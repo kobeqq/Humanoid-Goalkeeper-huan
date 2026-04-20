@@ -119,9 +119,10 @@ class ActorCritic(nn.Module):
 
         self.estimate_ball_dim = 6
 
-        self.num_regions = 6
+        # self.num_regions = 6
 
-        mlp_input_dim_a = num_one_step_obs + self.history_latent_dim + self.estimate_ball_dim + 1
+        # mlp_input_dim_a = num_one_step_obs + self.history_latent_dim + self.estimate_ball_dim + 1
+        mlp_input_dim_a = num_one_step_obs + self.history_latent_dim + self.estimate_ball_dim
         
         self.num_actor_input  = mlp_input_dim_a
 
@@ -145,13 +146,13 @@ class ActorCritic(nn.Module):
             nn.Linear(32, self.estimate_ball_dim),
         )
 
-        self.region_estimator = nn.Sequential(
-            nn.Linear(mlp_input_dim_h, 128),
-            nn.ReLU(),
-            nn.Linear(128, 32),
-            nn.ReLU(),
-            nn.Linear(32, self.num_regions),
-        )
+        # self.region_estimator = nn.Sequential(
+        #     nn.Linear(mlp_input_dim_h, 128),
+        #     nn.ReLU(),
+        #     nn.Linear(128, 32),
+        #     nn.ReLU(),
+        #     nn.Linear(32, self.num_regions),
+        # )
 
 
 
@@ -185,7 +186,7 @@ class ActorCritic(nn.Module):
         print(f"Critic MLP: {self.critic}")
         print(f"History MLP: {self.history_encoder}")
         print(f"Ball MLP: {self.ball_estimator}")
-        print(f"Region MLP: {self.region_estimator}")
+        # print(f"Region MLP: {self.region_estimator}")
         # Action noise
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
@@ -228,8 +229,9 @@ class ActorCritic(nn.Module):
         
         self.estimate_ball = self.ball_estimator(obs_history)
 
-        self.estimate_region = self.region_estimator(obs_history)
-        actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, self.estimate_ball, torch.argmax(self.estimate_region, dim=-1, keepdim=True)), dim=-1)
+        # self.estimate_region = self.region_estimator(obs_history)
+        # actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, self.estimate_ball, torch.argmax(self.estimate_region, dim=-1, keepdim=True)), dim=-1)
+        actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, self.estimate_ball), dim=-1)
         
         action_mean = self.actor(actor_input)
         
@@ -237,7 +239,8 @@ class ActorCritic(nn.Module):
 
     def act(self, obs_history=None, **kwargs):
         self.update_distribution(obs_history)
-        return self.distribution.sample(), self.estimate_ball, self.estimate_region
+        # return self.distribution.sample(), self.estimate_ball, self.estimate_region
+        return self.distribution.sample(), self.estimate_ball
     
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
@@ -248,10 +251,10 @@ class ActorCritic(nn.Module):
         
         estimate_ball = self.ball_estimator(obs_history)
         
-        estimate_region = self.region_estimator(obs_history)
+        # estimate_region = self.region_estimator(obs_history)
 
-        actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, estimate_ball, torch.argmax(estimate_region, dim=-1, keepdim=True)), dim=-1)
-
+        #actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, estimate_ball, torch.argmax(estimate_region, dim=-1, keepdim=True)), dim=-1)
+        actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, estimate_ball), dim=-1)
         action_mean = self.actor(actor_input)
 
         return action_mean

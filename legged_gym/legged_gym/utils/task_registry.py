@@ -60,7 +60,7 @@ class TaskRegistry():
         train_cfg = self.train_cfgs[name]
         env_cfg = self.env_cfgs[name]
         # copy seed
-        env_cfg.seed = train_cfg.seed
+        env_cfg.seed = train_cfg.seed 
         return env_cfg, train_cfg
     
     def make_env(self, name, args=None, env_cfg=None) -> Tuple[VecEnv, LeggedRobotCfg]:
@@ -122,7 +122,7 @@ class TaskRegistry():
             Dict: the corresponding config file
         """
         # if no args passed get command line arguments
-        if args is None:
+        if args is None:    
             args = get_args()
         # if config files are passed use them, otherwise load from the name
         if train_cfg is None:

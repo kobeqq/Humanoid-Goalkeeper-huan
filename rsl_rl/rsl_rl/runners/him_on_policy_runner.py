@@ -87,7 +87,8 @@ class HIMOnPolicyRunner:
 
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # HIMPPO
-        self.alg: HIMPPO = alg_class(actor_critic,  amp=amp, amp_normalizer=amp_normalizer,motion_buffer=self.env.motions, device=self.device, **self.alg_cfg)
+        motion_buffer = next(iter(self.env.motions.values()))
+        self.alg: HIMPPO = alg_class(actor_critic,  amp=amp, amp_normalizer=amp_normalizer,motion_buffer=motion_buffer, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
@@ -163,19 +164,20 @@ class HIMOnPolicyRunner:
                     self.alg.process_amp_state(amp_state_)
 
                     num_envs = obs.shape[0]
-                    amp_reward = torch.zeros(num_envs, device=obs.device)
+                    # amp_reward = torch.zeros(num_envs, device=obs.device)
+                    amp_reward = self.alg.amp.predict_reward(amp_state_, normalizer=self.alg.amp_normalizer).squeeze(1) * 0.5
 
-                    motion_ids = 3 * critic_obs[:,self.alg.actor_critic.num_one_step_obs + 3]
-                    for motion_key, motion_val in zip(
-                        ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"],
-                        [0, 1, 2, 3, 4, 5]
-                    ):
-                        mask = motion_ids == motion_val
-                        if mask.any():
-                            rew = self.alg.amp[motion_key].predict_reward(
-                                amp_state_[mask], normalizer=self.alg.amp_normalizer
-                            ).squeeze(1) * 0.5
-                            amp_reward[mask] = rew
+                    # motion_ids = 3 * critic_obs[:,self.alg.actor_critic.num_one_step_obs + 3]  #这是
+                    # for motion_key, motion_val in zip(
+                    #     ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"],
+                    #     [0, 1, 2, 3, 4, 5]
+                    # ):
+                    #     mask = motion_ids == motion_val
+                    #     if mask.any():
+                    #         rew = self.alg.amp[motion_key].predict_reward(
+                    #             amp_state_[mask], normalizer=self.alg.amp_normalizer
+                    #         ).squeeze(1) * 0.5
+                    #         amp_reward[mask] = rew
                     
  
 
@@ -256,7 +258,7 @@ class HIMOnPolicyRunner:
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/estball', locs['mean_est_loss'], locs['it'])
-        self.writer.add_scalar('Loss/region', locs['mean_region_loss'], locs['it'])
+        # self.writer.add_scalar('Loss/region', locs['mean_region_loss'], locs['it'])
 
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Loss/amp_loss', locs['amp_loss'], locs['it'])
@@ -285,7 +287,7 @@ class HIMOnPolicyRunner:
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Estimate ball loss:':>{pad}} {locs['mean_est_loss']:.4f}\n"""
-                          f"""{'Region loss:':>{pad}} {locs['mean_region_loss']:.4f}\n"""
+                        #   f"""{'Region loss:':>{pad}} {locs['mean_region_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                           f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                           f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
@@ -297,7 +299,7 @@ class HIMOnPolicyRunner:
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Estimate ball loss:':>{pad}} {locs['mean_est_loss']:.4f}\n"""
-                          f"""{'Region loss:':>{pad}} {locs['mean_region_loss']:.4f}\n"""
+                        #   f"""{'Region loss:':>{pad}} {locs['mean_region_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
 
         log_string += ep_string

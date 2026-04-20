@@ -1,6 +1,6 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
-class G129Cfg(LeggedRobotCfg):
+class G1LOCO13Cfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
         num_envs = 6144
 
@@ -230,7 +230,7 @@ class G129Cfg(LeggedRobotCfg):
         imu_link = "imu_link"
         knee_names = ["left_knee_link", "right_knee_link"]
         
-        keyframe_name = "keyframe"
+        keyframe_name = "__no_keyframe__"
 
         disable_gravity = False
         collapse_fixed_joints = False # merge bodies connected by fixed joints. Specific fixed joints can be kept by adding " <... dont_collapse="true">
@@ -352,19 +352,19 @@ class G129Cfg(LeggedRobotCfg):
 
 
     class dataset:
-        folder = "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper"
-        joint_mapping = "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper/joint_id.txt"
+        folder = "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper_from_pkl"
+        joint_mapping = "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper_from_pkl/joint_id.txt"
         frame_rate = 30
         min_time = 0.1 #
 
     class amp:
 
         obs_type = 'dof'
-        num_obs = 29 * 2  # (old and new)
+        num_obs = 13 * 2  # (old and new)
         amp_coef = 0.4   # AMP的奖励权重
         num_steps = 2   # 时间步长度
 
-class G129CfgPPO( LeggedRobotCfgPPO ):
+class G1LOCO13CfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
     class runner( LeggedRobotCfgPPO.runner ):
@@ -386,4 +386,4 @@ class G129CfgPPO( LeggedRobotCfgPPO ):
         checkpoint = -1 # -1 = last saved model
         resume_path = None # updated from load_run and chkpt
     
-    amp = G129Cfg.amp
+    amp = G1LOCO13Cfg.amp

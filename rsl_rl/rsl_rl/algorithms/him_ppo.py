@@ -87,32 +87,15 @@ class HIMPPO:
         self.smoothness_lower_bound = smoothness_lower_bound
 
         # amp
-        self.amp = {
-            "lefthand": deepcopy(amp),
-            "righthand": deepcopy(amp),
-            "leftjump": deepcopy(amp),
-            "rightjump": deepcopy(amp),
-            "leftstep": deepcopy(amp),
-            "rightstep": deepcopy(amp)
-        }
+        self.amp = deepcopy(amp).to(self.device)
 
-        for model in self.amp.values():
-            model.to(self.device)
+        
         params = [
             {'params': self.actor_critic.parameters(), 'name': 'actor_critic'},
+            {'params': self.amp.trunk.parameters(), 'weight_decay': 10e-4, 'name': 'amp_trunk'},
+            {'params': self.amp.amp_linear.parameters(), 'weight_decay': 10e-2, 'name': 'amp_head'},
         ]
 
-        for key in self.amp:
-            params.append({
-                'params': self.amp[key].trunk.parameters(),
-                'weight_decay': 10e-4,
-                'name': f'amp_trunk_{key}'
-            })
-            params.append({
-                'params': self.amp[key].amp_linear.parameters(),
-                'weight_decay': 10e-2,
-                'name': f'amp_head_{key}'
-            })
         self.optimizer = optim.Adam(params, lr=learning_rate)
         self.amp_normalizer = amp_normalizer
         self.motion_buffer = motion_buffer
@@ -181,10 +164,11 @@ class HIMPPO:
         for obs_batch, next_obs_batch, critic_obs_batch, actions_batch, next_critic_obs_batch, cont_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
             old_mu_batch, old_sigma_batch, amp_obs_batch in generator:
 
-                _, estball_batch, estregion_batch = self.actor_critic.act(obs_batch)
+                # _, estball_batch, estregion_batch = self.actor_critic.act(obs_batch)
+                _, estball_batch = self.actor_critic.act(obs_batch)
                 
                 gtball_batch = critic_obs_batch[:, -13:-7]
-                gtregion_batch = (3 * critic_obs_batch[:, -14]).long()
+                # gtregion_batch = (3 * critic_obs_batch[:, -14]).long()   
 
                 actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
                 value_batch = self.actor_critic.evaluate(critic_obs_batch)
@@ -225,8 +209,9 @@ class HIMPPO:
                 
                 # est ball loss
                 est_loss = (estball_batch - gtball_batch).pow(2).mean()
-                region_loss = nn.CrossEntropyLoss()(estregion_batch, gtregion_batch)
-                loss = surrogate_loss + est_loss + region_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                # region_loss = nn.CrossEntropyLoss()(estregion_batch, gtregion_batch)
+                # loss = surrogate_loss + est_loss + region_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                loss = surrogate_loss + est_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
                 # Smooth loss
                 epsilon = self.smoothness_lower_bound / (self.smoothness_upper_bound - self.smoothness_lower_bound)
@@ -245,59 +230,63 @@ class HIMPPO:
                 if self.amp is not None:
                     # import ipdb; ipdb.set_trace()
 
-                    motion_ids = 3 * critic_obs_batch[:,self.actor_critic.num_one_step_obs + 3]
-                    amp_expert_obs_batch_mask = torch.zeros_like(amp_obs_batch)
-                    motion_ids_0 = motion_ids == 0
-                    if motion_ids_0.any():
-                        amp_expert_obs_batch_mask[motion_ids_0] = self.motion_buffer["lefthand"].get_expert_obs(
-                            batch_size=obs_batch[motion_ids_0].shape[0]
-                        ).to(self.device)
+                    # motion_ids = 3 * critic_obs_batch[:,self.actor_critic.num_one_step_obs + 3]
+                    # amp_expert_obs_batch_mask = torch.zeros_like(amp_obs_batch)
+                    # motion_ids_0 = motion_ids == 0
+                    # if motion_ids_0.any():
+                    #     amp_expert_obs_batch_mask[motion_ids_0] = self.motion_buffer["lefthand"].get_expert_obs(
+                    #         batch_size=obs_batch[motion_ids_0].shape[0]
+                    #     ).to(self.device)
 
-                    motion_ids_1 = motion_ids == 1
-                    if motion_ids_1.any():
-                        amp_expert_obs_batch_mask[motion_ids_1] = self.motion_buffer["righthand"].get_expert_obs(
-                            batch_size=obs_batch[motion_ids_1].shape[0]
-                        ).to(self.device)
+                    # motion_ids_1 = motion_ids == 1
+                    # if motion_ids_1.any():
+                    #     amp_expert_obs_batch_mask[motion_ids_1] = self.motion_buffer["righthand"].get_expert_obs(
+                    #         batch_size=obs_batch[motion_ids_1].shape[0]
+                    #     ).to(self.device)
 
-                    motion_ids_2 = motion_ids == 2
-                    if motion_ids_2.any():
-                        amp_expert_obs_batch_mask[motion_ids_2] = self.motion_buffer["leftjump"].get_expert_obs(
-                            batch_size=obs_batch[motion_ids_2].shape[0]
-                        ).to(self.device)
+                    # motion_ids_2 = motion_ids == 2
+                    # if motion_ids_2.any():
+                    #     amp_expert_obs_batch_mask[motion_ids_2] = self.motion_buffer["leftjump"].get_expert_obs(
+                    #         batch_size=obs_batch[motion_ids_2].shape[0]
+                    #     ).to(self.device)
 
-                    motion_ids_3 = motion_ids == 3
-                    if motion_ids_3.any():
-                        amp_expert_obs_batch_mask[motion_ids_3] = self.motion_buffer["rightjump"].get_expert_obs(
-                            batch_size=obs_batch[motion_ids_3].shape[0]
-                        ).to(self.device)
+                    # motion_ids_3 = motion_ids == 3
+                    # if motion_ids_3.any():
+                    #     amp_expert_obs_batch_mask[motion_ids_3] = self.motion_buffer["rightjump"].get_expert_obs(
+                    #         batch_size=obs_batch[motion_ids_3].shape[0]
+                    #     ).to(self.device)
 
-                    motion_ids_4 = motion_ids == 4
-                    if motion_ids_4.any():
-                        amp_expert_obs_batch_mask[motion_ids_4] = self.motion_buffer["leftstep"].get_expert_obs(
-                            batch_size=obs_batch[motion_ids_4].shape[0]
-                        ).to(self.device)
+                    # motion_ids_4 = motion_ids == 4
+                    # if motion_ids_4.any():
+                    #     amp_expert_obs_batch_mask[motion_ids_4] = self.motion_buffer["leftstep"].get_expert_obs(
+                    #         batch_size=obs_batch[motion_ids_4].shape[0]
+                    #     ).to(self.device)
 
-                    motion_ids_5 = motion_ids == 5
-                    if motion_ids_5.any():
-                        amp_expert_obs_batch_mask[motion_ids_5] = self.motion_buffer["rightstep"].get_expert_obs(
-                            batch_size=obs_batch[motion_ids_5].shape[0]
-                        ).to(self.device)
+                    # motion_ids_5 = motion_ids == 5
+                    # if motion_ids_5.any():
+                    #     amp_expert_obs_batch_mask[motion_ids_5] = self.motion_buffer["rightstep"].get_expert_obs(
+                    #         batch_size=obs_batch[motion_ids_5].shape[0]
+                    #     ).to(self.device)
 
                                         
-                    amp_expert_obs_batch = self.amp_normalizer.normalize_torch(amp_expert_obs_batch_mask, self.device)
+                    # amp_expert_obs_batch = self.amp_normalizer.normalize_torch(amp_expert_obs_batch_mask, self.device)
+                    amp_expert_obs_batch = self.motion_buffer.get_expert_obs(batch_size=amp_obs_batch.shape[0]).to(self.device)
+                    amp_expert_obs_batch = self.amp_normalizer.normalize_torch(amp_expert_obs_batch, self.device)
                     amp_obs_batch = self.amp_normalizer.normalize_torch(amp_obs_batch, self.device)
             
                     amp_loss, expert_loss, policy_loss = 0.0, 0.0, 0.0
-                    for motion_key, motion_mask in zip(
-                        ["lefthand", "righthand", "leftjump", "rightjump" , "leftstep", "rightstep"],
-                        [motion_ids_0, motion_ids_1, motion_ids_2, motion_ids_3, motion_ids_4, motion_ids_5]
-                    ):
-                        if motion_mask.any():
-                            loss_part, expert_loss_part, policy_loss_part = self.amp[motion_key].compute_loss(
-                                amp_obs_batch[motion_mask], amp_expert_obs_batch[motion_mask])
-                            amp_loss += loss_part
-                            expert_loss += expert_loss_part
-                            policy_loss += policy_loss_part
+                    assert amp_obs_batch.shape == amp_expert_obs_batch.shape
+                    amp_loss, expert_loss, policy_loss = self.amp.compute_loss(amp_obs_batch, amp_expert_obs_batch)
+                    # for motion_key, motion_mask in zip(
+                    #     ["lefthand", "righthand", "leftjump", "rightjump" , "leftstep", "rightstep"],
+                    #     [motion_ids_0, motion_ids_1, motion_ids_2, motion_ids_3, motion_ids_4, motion_ids_5]
+                    # ):
+                    #     if motion_mask.any():
+                    #         loss_part, expert_loss_part, policy_loss_part = self.amp[motion_key].compute_loss(
+                    #             amp_obs_batch[motion_mask], amp_expert_obs_batch[motion_mask])
+                    #         amp_loss += loss_part
+                    #         expert_loss += expert_loss_part
+                    #         policy_loss += policy_loss_part
 
 
                     loss += amp_loss
@@ -312,7 +301,8 @@ class HIMPPO:
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
                 mean_est_loss += est_loss.item()
-                mean_region_loss += region_loss.item()
+                # mean_region_loss += region_loss.item()
+                mean_region_loss += 0.0
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
