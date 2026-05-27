@@ -102,6 +102,7 @@ class ActorCritic(nn.Module):
                 activation='elu',
                 init_noise_std=1.0,
                 **kwargs):
+        self.estimate_ball_dim = kwargs.pop("estimate_ball_dim", 6)
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
         super(ActorCritic, self).__init__()
@@ -117,7 +118,7 @@ class ActorCritic(nn.Module):
 
         self.history_latent_dim = 16
 
-        self.estimate_ball_dim = 6
+        # self.estimate_ball_dim = 6
 
         # self.num_regions = 6
 
@@ -138,13 +139,16 @@ class ActorCritic(nn.Module):
             nn.Linear(64, self.history_latent_dim),
         )
 
-        self.ball_estimator = nn.Sequential(
-            nn.Linear(mlp_input_dim_h, 128),
-            nn.ReLU(),
-            nn.Linear(128, 32),
-            nn.ReLU(),
-            nn.Linear(32, self.estimate_ball_dim),
-        )
+        if self.estimate_ball_dim > 0:
+            self.ball_estimator = nn.Sequential(
+                nn.Linear(mlp_input_dim_h, 128),
+                nn.ReLU(),
+                nn.Linear(128, 32),
+                nn.ReLU(),
+                nn.Linear(32, self.estimate_ball_dim),
+            )
+        else:
+            self.ball_estimator = None
 
         # self.region_estimator = nn.Sequential(
         #     nn.Linear(mlp_input_dim_h, 128),
@@ -227,11 +231,21 @@ class ActorCritic(nn.Module):
 
         history_latent = self.history_encoder(obs_history)
         
-        self.estimate_ball = self.ball_estimator(obs_history)
+        # self.estimate_ball = self.ball_estimator(obs_history)
+
+        actor_pieces = [obs_history[:,-self.num_one_step_obs:], history_latent]
+        if self.ball_estimator is not None:
+            self.estimate_ball = self.ball_estimator(obs_history)
+            actor_pieces.append(self.estimate_ball)
+        else:
+            self.estimate_ball = None
+        actor_input = torch.cat(actor_pieces, dim=-1)
+        
+ 
 
         # self.estimate_region = self.region_estimator(obs_history)
         # actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, self.estimate_ball, torch.argmax(self.estimate_region, dim=-1, keepdim=True)), dim=-1)
-        actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, self.estimate_ball), dim=-1)
+        # actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, self.estimate_ball), dim=-1)
         
         action_mean = self.actor(actor_input)
         
@@ -249,12 +263,19 @@ class ActorCritic(nn.Module):
 
         history_latent = self.history_encoder(obs_history)
         
-        estimate_ball = self.ball_estimator(obs_history)
-        
+        # estimate_ball = self.ball_estimator(obs_history)
+        actor_pieces = [obs_history[:, -self.num_one_step_obs:], history_latent]
+        if self.ball_estimator is not None:
+            estimate_ball = self.ball_estimator(obs_history)
+            actor_pieces.append(estimate_ball)
+        else:
+            estimate_ball = None
+        actor_input = torch.cat(actor_pieces, dim=-1)
+        action_mean = self.actor(actor_input)
         # estimate_region = self.region_estimator(obs_history)
 
         #actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, estimate_ball, torch.argmax(estimate_region, dim=-1, keepdim=True)), dim=-1)
-        actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, estimate_ball), dim=-1)
+        # actor_input = torch.cat((obs_history[:,-self.num_one_step_obs:], history_latent, estimate_ball), dim=-1)
         action_mean = self.actor(actor_input)
 
         return action_mean

@@ -272,8 +272,14 @@ class PolicyOnnx(torch.nn.Module):
         super().__init__()
         self.actor = copy.deepcopy(actor_critic.actor)
         self.history_encoder = copy.deepcopy(actor_critic.history_encoder)
-        self.ball_estimator = copy.deepcopy(actor_critic.ball_estimator)
-        self.region_estimator = copy.deepcopy(actor_critic.region_estimator)
+        self.ball_estimator = None
+        if hasattr(actor_critic, "ball_estimator") and actor_critic.ball_estimator is not None:
+            self.ball_estimator = copy.deepcopy(actor_critic.ball_estimator)
+        # Some checkpoints/configs prune/disable region estimation entirely.
+        # Keep export compatible with both variants by making this optional.
+        self.region_estimator = None
+        if hasattr(actor_critic, "region_estimator") and actor_critic.region_estimator is not None:
+            self.region_estimator = copy.deepcopy(actor_critic.region_estimator)
         self.history_length = actor_critic.actor_history_length
         self.num_one_step_obs = actor_critic.num_one_step_obs
         self.num_proprioceptive_obs = self.history_length * self.num_one_step_obs
@@ -282,11 +288,18 @@ class PolicyOnnx(torch.nn.Module):
     def forward(self, x):
 
         history_latent = self.history_encoder(x)
-        estimate_ball = self.ball_estimator(x)
-        estimate_region = self.region_estimator(x)
-        estimate_region = torch.argmax(estimate_region, dim=-1, keepdim=True)
-        actor_input = torch.cat((x[:,-self.num_one_step_obs:], history_latent, estimate_ball, estimate_region), dim=-1)
+        actor_pieces = [x[:, -self.num_one_step_obs:], history_latent]
 
+        if self.ball_estimator is not None:
+            estimate_ball = self.ball_estimator(x)
+            actor_pieces.append(estimate_ball)
+
+        if self.region_estimator is not None:
+            estimate_region = self.region_estimator(x)
+            estimate_region = torch.argmax(estimate_region, dim=-1, keepdim=True)
+            actor_pieces.append(estimate_region)
+
+        actor_input = torch.cat(actor_pieces, dim=-1)
         return self.actor(actor_input)
 
     def export(self, path, filename):

@@ -1,0 +1,16 @@
+{
+  "include": [
+    "legged_gym/legged_gym",
+    "rsl_rl/rsl_rl"
+  ],
+  "extraPaths": [
+    "legged_gym",
+    "rsl_rl"
+  ],
+  "stubPath": "typings",
+  "reportPrivateImportUsage": false,
+  "reportMissingModuleSource": false,
+  "reportMissingImports": "warning",
+  "reportOptionalSubscript": "none",
+  "reportOptionalMemberAccess": "warning"
+}

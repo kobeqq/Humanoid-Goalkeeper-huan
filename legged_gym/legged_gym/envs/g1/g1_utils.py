@@ -26,6 +26,7 @@ def euler_from_quaternion(quat_angle):
     pitch is rotation around y in radians (counterclockwise)
     yaw is rotation around z in radians (counterclockwise)
     """
+    quat_angle = torch.as_tensor(quat_angle, dtype=torch.float32)
     x = quat_angle[:,0]; y = quat_angle[:,1]; z = quat_angle[:,2]; w = quat_angle[:,3]
     t0 = +2.0 * (w * x + y * z)
     t1 = +1.0 - 2.0 * (x * x + y * y)
@@ -53,10 +54,10 @@ def load_imitation_dataset(folder, mapping="joint_id.txt", suffix=".pt"):
             
             dataset = {}
             data = torch.load(os.path.join(folder, filename))
-            dataset[filename[:-len(suffix)]] = data
+            dataset[filename[:-len(suffix)]] = data   #通过负向切片去掉了后缀名
             # Use the filename without the suffix as the key in dataset
-            dataset_list = list(dataset.values())
-            random.shuffle(dataset_list)
+            dataset_list = list(dataset.values()) #将dataset的值转换为列表
+            random.shuffle(dataset_list) #随机打乱列表
 
             multidataset[filename[:-len(suffix)]] = dataset_list
 
@@ -67,17 +68,34 @@ def load_imitation_dataset(folder, mapping="joint_id.txt", suffix=".pt"):
 
     # Read and process the joint_id mapping
     with open(mapping, "r") as file:
-        lines = file.readlines()
+        lines = file.readlines() #读取文件中的每一行
 
     # Process the joint ID mapping into a dictionary
-    lines = [line.strip().split(" ") for line in lines]
+    lines = [line.strip().split(" ") for line in lines] #将每一行中的空格分割成列表
     joint_id_dict = {k: int(v) for v, k in lines}
 
     return multidataset, joint_id_dict
 
 
 class MotionLib:
-    def __init__(self, datasets, mapping, dof_names, keyframe_names, fps=30, min_dt=0.1, device="cpu", amp_obs_type='keyframe', num_steps=2):
+    def __init__(
+        self,
+        datasets,
+        mapping,
+        dof_names,
+        keyframe_names,
+        fps=30,
+        min_dt=0.1,
+        device="cuda:0",
+        amp_obs_type="keyframe",
+        num_steps=2,
+    ):
+        if isinstance(device, str) and device.strip().lower() == "gpu":
+            device = "cuda:0"
+        if not isinstance(device, torch.device):
+            device = torch.device(device)
+        if device.type == "cuda" and not torch.cuda.is_available():
+            device = torch.device("cpu")
         self.device, self.fps = device, fps
         self.env_fps = 50
         self.num_steps = num_steps

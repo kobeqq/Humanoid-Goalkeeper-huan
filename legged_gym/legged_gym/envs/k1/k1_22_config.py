@@ -89,24 +89,43 @@ class K122Cfg(LeggedRobotCfg):#TODO: 这个类是用于创建机器人环境
 
     class init_state(LeggedRobotCfg.init_state):#TODO: 这个类是用于初始化机器人状态
         pos = [0.0, 0.0, 0.8] # x,y,z [m]
-        default_joint_angles = {  # = target angles [rad] when action = 0.0
-            
-            ".*Shoulder_Pitch": 0.2,
-            "Left_Shoulder_Roll": -1.25,
-            "Right_Shoulder_Roll": 1.25,
-            "Left_Elbow_Yaw": -0.5,
-            "Right_Elbow_Yaw": 0.5,
-            ".*_Hip_Pitch": -0.15,
-            ".*_Knee_Pitch": 0.3,
-            ".*_Ankle_Pitch": -0.15,
+        default_joint_angles = {  # target angles [rad] when action = 0.0
+            "AAHead_yaw": 0.18,
+            "Head_pitch": 0.22,
 
-            }
+            "ALeft_Shoulder_Pitch": -0.19,
+            "Left_Shoulder_Roll": -1.28,
+            "Left_Elbow_Pitch": 0.42,
+            "Left_Elbow_Yaw": -1.61,
 
-        init_pos = [-0.34930936, -0.03763366, -0.22198406,  0.93093884, -0.50943524, -0.08583859,
-            0.13749947, -0.44516975, -0.06791031,  0.11570476, -0.17351833,  0.34241587,
-              0.00395479,  0.49003497, -0.00168978,
-            1.2062242,  0.00319979, -0.4975251,
-            -0.00450607,  1.20307243]
+            "ARight_Shoulder_Pitch": -0.55,
+            "Right_Shoulder_Roll": 1.36,
+            "Right_Elbow_Pitch": 0.43,
+            "Right_Elbow_Yaw": 1.52,
+
+            "Left_Hip_Pitch": -0.73,
+            "Left_Hip_Roll": 0.00,
+            "Left_Hip_Yaw": -0.07,
+            "Left_Knee_Pitch": 0.76,
+            "Left_Ankle_Pitch": -0.23,
+            "Left_Ankle_Roll": 0.09,
+
+            "Right_Hip_Pitch": -0.82,
+            "Right_Hip_Roll": -0.14,
+            "Right_Hip_Yaw": 0.11,
+            "Right_Knee_Pitch": 0.79,
+            "Right_Ankle_Pitch": -0.23,
+            "Right_Ankle_Roll": 0.06,
+        }
+
+        init_pos = [0.1842425, 0.2240987, -0.1946197,
+                    -1.2770557, 0.4178072, -1.6088617,
+                    -0.5537755, 1.3627010, 0.4302563,
+                    1.5203257, -0.7325160, 0.0015820,
+                    -0.0698912, 0.7558325, -0.2323351,
+                    0.0906837, -0.8220147, -0.1386372,
+                    0.1147351, 0.7931713, -0.2314957,
+                    0.0641427]
         
 
 
@@ -115,30 +134,60 @@ class K122Cfg(LeggedRobotCfg):#TODO: 这个类是用于创建机器人环境
         # PD Drive parameters:
         control_type = 'P'
           # PD Drive parameters:
-        stiffness = {".*Shoulder_Pitch": 20.0,
-                ".*Shoulder_Roll": 20.0,
-                ".*Elbow_Pitch": 20.0,
-                ".*Elbow_Yaw": 20.0,
-                ".*_Hip_Pitch": 100.0,
-                ".*_Hip_Roll": 100.0,
-                ".*_Hip_Yaw": 100.0,
-                ".*_Knee_Pitch": 100.0,
-                ".*_Ankle_Pitch": 50,
-                ".*_Ankle_Roll": 50,
+        stiffness = {"AAHead_yaw": 10.0,
+            "Head_pitch": 10.0,
 
-                     }  # [N*m/rad]
-        damping = {".*Shoulder_Pitch": 2.0,
-                ".*Shoulder_Roll": 2.0,
-                ".*Elbow_Pitch": 2.0,
-                ".*Elbow_Yaw": 2.0,
-                ".*_Hip_Pitch": 2.0,
-                ".*_Hip_Roll": 2.0,
-                ".*_Hip_Yaw": 2.0,
-                ".*_Knee_Pitch": 2.0,
-                ".*_Ankle_Pitch": 1,
-                ".*_Ankle_Roll": 1,
+            "ALeft_Shoulder_Pitch": 4,
+            "Left_Shoulder_Roll": 4,
+            "Left_Elbow_Pitch": 4,
+            "Left_Elbow_Yaw": 4,
 
-                     }  # [N*m/rad]  # [N*m*s/rad]
+            "ARight_Shoulder_Pitch": 4,
+            "Right_Shoulder_Roll": 4,
+            "Right_Elbow_Pitch": 4,
+            "Right_Elbow_Yaw": 4,
+
+            "Left_Hip_Pitch": 80,
+            "Left_Hip_Roll": 80,
+            "Left_Hip_Yaw": 80,
+            "Left_Knee_Pitch": 80,
+            "Left_Ankle_Pitch": 30,
+            "Left_Ankle_Roll": 30,
+
+            "Right_Hip_Pitch": 80,
+            "Right_Hip_Roll": 80,
+            "Right_Hip_Yaw": 80,
+            "Right_Knee_Pitch": 80,
+            "Right_Ankle_Pitch": 30,
+            "Right_Ankle_Roll": 30,
+        }  # [N*m/rad]
+        damping = {"AAHead_yaw": 2,
+            "Head_pitch": 2,
+
+            "ALeft_Shoulder_Pitch": 1,
+            "Left_Shoulder_Roll": 1,
+            "Left_Elbow_Pitch": 1,
+            "Left_Elbow_Yaw": 1,
+
+            "ARight_Shoulder_Pitch": 1,
+            "Right_Shoulder_Roll": 1,
+            "Right_Elbow_Pitch": 1,
+            "Right_Elbow_Yaw": 1,
+
+            "Left_Hip_Pitch": 2,
+            "Left_Hip_Roll": 2,
+            "Left_Hip_Yaw": 2,
+            "Left_Knee_Pitch": 2,
+            "Left_Ankle_Pitch": 2,
+            "Left_Ankle_Roll": 2,
+
+            "Right_Hip_Pitch": 2,
+            "Right_Hip_Roll": 2,
+            "Right_Hip_Yaw": 2,
+            "Right_Knee_Pitch": 2,
+            "Right_Ankle_Pitch": 2,
+            "Right_Ankle_Roll": 2,
+        }   # [N*m/rad]  # [N*m*s/rad]
         # action scale: target angle = actionScale * action + defaultAngle
         action_scale = 0.25 #TODO: 这个参数是用于控制动作的缩放比例
         # decimation: Number of control action updates @ sim DT per policy DT
@@ -155,8 +204,9 @@ class K122Cfg(LeggedRobotCfg):#TODO: 这个类是用于创建机器人环境
 
 
 
-        upper_body_link = "pelvis"  # "torso_link"   #这个是上体链接
-        torso_link = "torso_link"  #这是上体链接
+        # K1 URDF root rigid body is `Trunk`
+        upper_body_link = "Trunk"
+        torso_link = "Trunk"
 
         left_hip_joints = ['Left_Hip_Yaw', 'Left_Hip_Roll', 'Left_Hip_Pitch']
         right_hip_joints = ['Right_Hip_Yaw', 'Right_Hip_Roll', 'Right_Hip_Pitch']
@@ -165,7 +215,7 @@ class K122Cfg(LeggedRobotCfg):#TODO: 这个类是用于创建机器人环境
     class terrain:#TODO: 这个类是用于定义地形
         static_friction = 1.0
         dynamic_friction = 1.0
-        restitution = 0.
+        restitution = 0. 
     class normalization:
         class obs_scales:
             lin_vel = 2.0
@@ -194,21 +244,26 @@ class K122Cfg(LeggedRobotCfg):#TODO: 这个类是用于创建机器人环境
     class asset(LeggedRobotCfg.asset):#TODO: 这个类是用于定义机器人资产
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/k1/urdf/K1_22dof.urdf'
         ballfile = '{LEGGED_GYM_ROOT_DIR}/resources/gymassets/urdf/ball.urdf'
-        name = "g1"
+        name = "booster_k1"
 
-        foot_name = "Ankle_Pitch"
+        # K1 URDF feet links: `left_foot_link`, `right_foot_link`
+        foot_name = "foot_link"
         contact_foot_names = "foot_link"
 
-        hand_name = "hand"
-        penalize_contacts_on = ["hip", "knee", "shoulder", "elbow", "hand", "head"]
+        # K1 URDF hands links: `left_hand_link`, `right_hand_link`
+        hand_name = "hand_link"
+        # substring match against rigid body names (case-sensitive)
+        penalize_contacts_on = ["Hip", "Knee", "Shoulder", "Elbow", "hand_link", "Head", "Trunk"]
         terminate_after_contacts_on = []
 
         #waist_joints = ["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"]
         ankle_joints = [ "Left_Ankle_Pitch", "Left_Ankle_Roll","Right_Ankle_Pitch","Right_Ankle_Roll"]
         #imu_link = "imu_link"
-        knee_names = ["Left_Ankle_Cross", "Right_Ankle_Cross"]
+        # K1 URDF shank links correspond to knee segment
+        knee_names = ["Left_Shank", "Right_Shank"]
         
-        #keyframe_name = "keyframe"
+        # Optional: if URDF has no keyframes, this will match nothing (ok)
+        keyframe_name = "keyframe"
 
         disable_gravity = False
         collapse_fixed_joints = False # merge bodies connected by fixed joints. Specific fixed joints can be kept by adding " <... dont_collapse="true">
@@ -309,7 +364,7 @@ class K122Cfg(LeggedRobotCfg):#TODO: 这个类是用于创建机器人环境
             dof_vel_limits = -2.0   #关节速度极限惩罚：用于控制关节速度极限惩罚
             torque_limits = -3.0   #力矩极限惩罚：用于控制力矩极限惩罚
 
-            deviation_waist_pitch_joint = -0.001   #腰部关节pitch偏差惩罚：用于控制腰部关节pitch偏差惩罚
+            deviation_waist_pitch_joint = 0.0   #腰部关节pitch偏差惩罚：用于控制腰部关节pitch偏差惩罚
 
 
         only_positive_rewards = False # if true negative total rewards are clipped at zero (avoids early termination problems)
@@ -330,16 +385,18 @@ class K122Cfg(LeggedRobotCfg):#TODO: 这个类是用于创建机器人环境
 
 
     class dataset: #TODO: 这个类是用于定义数据集
-        folder = "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper"
-        joint_mapping = "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper/joint_id.txt"
+        folder = "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper_from_pkl_k1"
+        # joint_id indices must match columns in goalkeeper_from_pkl_k1.pt (22 dofs)
+        joint_mapping = "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper_from_pkl_k1/joint_id_k1.txt"
         frame_rate = 30
         min_time = 0.1 # sec
 
     class amp: #TODO: 这个类是用于定义amp
 
         obs_type = 'dof'
-        num_obs = 29 * 2  # (old and new)
-        amp_coef = 0.4
+        use_all_dofs = True
+        num_obs = 22 * 2  # (old and new)
+        amp_coef = 0.2
         num_steps = 2
 
 class K122CfgPPO( LeggedRobotCfgPPO ): #TODO: 这个类是用于创建PPO算法
@@ -353,9 +410,9 @@ class K122CfgPPO( LeggedRobotCfgPPO ): #TODO: 这个类是用于创建PPO算法
 
         # logging
         save_interval = 200 # 200次迭代保存一次模型
-        run_name = 'goalkeepper'
-        experiment_name = 'g1'
-        wandb_project = "goalkeepper"
+        run_name = 'goalkeepper_k1'
+        experiment_name = 'k1'
+        wandb_project = "goalkeepper_k1"
         logger = 'wandb'
         
         # load and resume

@@ -166,10 +166,12 @@ class HIMPPO:
 
                 # _, estball_batch, estregion_batch = self.actor_critic.act(obs_batch)
                 _, estball_batch = self.actor_critic.act(obs_batch)
-                
-                gtball_batch = critic_obs_batch[:, -13:-7]
-                # gtregion_batch = (3 * critic_obs_batch[:, -14]).long()   
+                est_loss = torch.zeros((), device=self.device)
+                if estball_batch is not None:
+                    gtball_batch = critic_obs_batch[:, -13:-7]
+                    est_loss = (estball_batch - gtball_batch).pow(2).mean()
 
+                
                 actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
                 value_batch = self.actor_critic.evaluate(critic_obs_batch)
 
@@ -208,7 +210,7 @@ class HIMPPO:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
                 
                 # est ball loss
-                est_loss = (estball_batch - gtball_batch).pow(2).mean()
+                # est_loss = (estball_batch - gtball_batch).pow(2).mean()
                 # region_loss = nn.CrossEntropyLoss()(estregion_batch, gtregion_batch)
                 # loss = surrogate_loss + est_loss + region_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
                 loss = surrogate_loss + est_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()

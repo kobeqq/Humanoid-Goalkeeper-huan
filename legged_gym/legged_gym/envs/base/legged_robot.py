@@ -42,7 +42,7 @@ import random
 import torch
 from torch import Tensor
 import torchvision
-from typing import Tuple, Dict
+from typing import Any, Tuple, Dict
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.base_task import BaseTask
@@ -159,7 +159,8 @@ class LeggedRobot(BaseTask):
     def get_amp_observations(self): #TODO: 这个函数是用于获取amp观测值
         """ with keys
         """
-
+        if getattr(self.cfg.amp, "use_all_dofs", False):
+            return self.dof_pos.clone()
         return self.dof_pos[:, self.amp_lower_dof_indices].clone()
 
 
@@ -858,18 +859,39 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_rigid_body_state_tensor(self.sim)
 
         # create some wrapper tensors for different slices
-        all_states = gymtorch.wrap_tensor(actor_root_state).view(self.num_envs, 2,13)
-        self.root_states, self.ball_states = all_states[:, 0, :], all_states[:,1, :]
-
+        # all_states = gymtorch.wrap_tensor(actor_root_state).view(self.num_envs, 2,13)
+        # self.root_states, self.ball_states = all_states[:, 0, :], all_states[:,1, :]
+        actor_root_state = gymtorch.wrap_tensor(actor_root_state)
+        print("ROOT STATE SHAPE:", actor_root_state.shape, "NUM ENVS:", self.num_envs, "USE BALL:", self.use_ball_actor)
+        if self.use_ball_actor:
+            all_states = actor_root_state.view(self.num_envs, 2, 13)
+            self.root_states, self.ball_states = all_states[:, 0, :], all_states[:, 1, :]
+        else:
+            self.root_states = actor_root_state.view(self.num_envs, 13)
+            self.ball_states = None
     
 
-        all_body_states = gymtorch.wrap_tensor(rigid_body_state).view(self.num_envs, self.num_bodies + 1, 13)
-        self.rigid_body_states = all_body_states[:, :-1, :]
+        # all_body_states = gymtorch.wrap_tensor(rigid_body_state).view(self.num_envs, self.num_bodies + 1, 13)
+        # self.rigid_body_states = all_body_states[:, :-1, :]
+        if self.use_ball_actor:
+            all_body_states = gymtorch.wrap_tensor(rigid_body_state).view(self.num_envs, self.num_bodies + 1, 13)
+            self.rigid_body_states = all_body_states[:, :-1, :]
+        else:
+            self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state).view(self.num_envs, self.num_bodies, 13)
 
-        all_contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, self.num_bodies + 1, 3) # shape: num_envs, num_bodies, xyz axis
-        self.contact_forces = all_contact_forces[:, :-1, :]
 
-        self.ball_contact_forces = all_contact_forces[:, -1:, :]
+        # all_contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, self.num_bodies + 1, 3) # shape: num_envs, num_bodies, xyz axis
+        # self.contact_forces = all_contact_forces[:, :-1, :]
+
+        # self.ball_contact_forces = all_contact_forces[:, -1:, :]
+
+        if self.use_ball_actor:
+            all_contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, self.num_bodies + 1, 3)
+            self.contact_forces = all_contact_forces[:, :-1, :]
+            self.ball_contact_forces = all_contact_forces[:, -1:, :]
+        else:
+            self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, self.num_bodies, 3)
+            self.ball_contact_forces = None
 
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]
@@ -903,18 +925,38 @@ class LeggedRobot(BaseTask):
         # self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         self.projected_gravity = quat_rotate_inverse(self.rigid_body_states[:, self.upper_body_index,3:7], self.gravity_vec)
         self.noise_scale_vec = self._get_noise_scale_vec(self.cfg)
-        self.amp_lower_dof_names = [
-    "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
-    "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
-    "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
-    "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
-    "waist_yaw_joint",
-]
-        self.amp_lower_dof_indices = torch.tensor(
-            [self.dof_names.index(n) for n in self.amp_lower_dof_names],
-            device=self.device,
-            dtype=torch.long,
-        )
+        
+        # --- original AMP lower-body dof selection (G1-specific names) ---
+        # self.amp_lower_dof_names = [
+        #     "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+        #     "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+        #     "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+        #     "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+        #     "waist_yaw_joint",
+        # ]
+        # self.amp_lower_dof_indices = torch.tensor(
+        #     [self.dof_names.index(n) for n in self.amp_lower_dof_names],
+        #     device=self.device,
+        #     dtype=torch.long,
+        # )
+        # ---------------------------------------------------------------
+
+        if getattr(self.cfg.amp, "use_all_dofs", False):
+            self.amp_lower_dof_names = list(self.dof_names)
+            self.amp_lower_dof_indices = torch.arange(self.num_dof, device=self.device, dtype=torch.long)
+        else:
+            self.amp_lower_dof_names = [
+                "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+                "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+                "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+                "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+                "waist_yaw_joint",
+            ]
+            self.amp_lower_dof_indices = torch.tensor(
+                [self.dof_names.index(n) for n in self.amp_lower_dof_names],
+                device=self.device,
+                dtype=torch.long,
+            )
 
         # joint positions offsets and PD gains
         self.default_dof_pos = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
@@ -1152,19 +1194,25 @@ class LeggedRobot(BaseTask):
         self.num_bodies = self.gym.get_asset_rigid_body_count(robot_asset)
         dof_props_asset = self.gym.get_asset_dof_properties(robot_asset)
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(robot_asset)
+
         self.ball_gravity = self.cfg.env.ball_gravity
         self.num_ballobs = self.cfg.env.num_ballobs
         self.play = self.cfg.env.play
+        self.use_ball_actor = getattr(self.cfg.env, "use_ball_actor", True)
+        print("USE BALL ACTOR:", self.use_ball_actor)
 
+
+        ball_asset = None
+        if self.use_ball_actor:
         ### load ball ###
-        asset_options.disable_gravity = False
-        ball_path = self.cfg.asset.ballfile.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
-        ball_root = os.path.dirname(ball_path)
-        ball_file = os.path.basename(ball_path)
-        ball_asset = self.gym.load_asset(self.sim, ball_root, ball_file, asset_options)
+            asset_options.disable_gravity = False
+            ball_path = self.cfg.asset.ballfile.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+            ball_root = os.path.dirname(ball_path)
+            ball_file = os.path.basename(ball_path)
+            ball_asset = self.gym.load_asset(self.sim, ball_root, ball_file, asset_options)
 
     
-
+        
         # save body names from the asset
         body_names = self.gym.get_asset_rigid_body_names(robot_asset)
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
@@ -1229,17 +1277,18 @@ class LeggedRobot(BaseTask):
             self.gym.set_actor_rigid_body_properties(env_handle, actor_handle, body_props, recomputeInertia=True)
             self.actor_handles.append(actor_handle)
 
-            ballpos = pos
-            ballpos[:0] += torch_rand_float(0.5, 1.0, (1,1), device=self.device).squeeze(1)
-            ballpos[:1] += torch_rand_float(-0.5, 0.5, (1,1), device=self.device).squeeze(1)
-            ballpos[2] = 1.5
-            
-            start_pose.p = gymapi.Vec3(*ballpos)
-            ball_handle = self.gym.create_actor(env_handle, ball_asset, start_pose, "ball", i, 0, 1)
-            c = 0.5 + 0.5 * np.random.random(3)
-            color = gymapi.Vec3(c[0], c[1], c[2])
-            self.gym.set_rigid_body_color(env_handle, ball_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color)
-            self.ball_handles.append(ball_handle)
+            if self.use_ball_actor:
+                ballpos = pos.clone()   
+                ballpos[:0] += torch_rand_float(0.5, 1.0, (1,1), device=self.device).squeeze(1)
+                ballpos[:1] += torch_rand_float(-0.5, 0.5, (1,1), device=self.device).squeeze(1)
+                ballpos[2] = 1.5
+                
+                start_pose.p = gymapi.Vec3(*ballpos)
+                ball_handle = self.gym.create_actor(env_handle, ball_asset, start_pose, "ball", i, 0, 1)
+                c = 0.5 + 0.5 * np.random.random(3)
+                color = gymapi.Vec3(c[0], c[1], c[2])
+                self.gym.set_rigid_body_color(env_handle, ball_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color)
+                self.ball_handles.append(ball_handle)
 
             self.envs.append(env_handle)
 
@@ -1307,17 +1356,19 @@ class LeggedRobot(BaseTask):
         for i in range(len(self.cfg.control.elbow_joints)):
             self.elbow_joint_indices[i] = self.dof_names.index(self.cfg.control.elbow_joints[i])
 
-        self.wrist_joint_indices = torch.zeros(len(self.cfg.control.wrist_joints), dtype=torch.long, device=self.device, requires_grad=False)
-        for i in range(len(self.cfg.control.wrist_joints)):
-            self.wrist_joint_indices[i] = self.dof_names.index(self.cfg.control.wrist_joints[i])
+        # Optional wrist joints (some robots omit wrists)
+        wrist_joints = getattr(self.cfg.control, "wrist_joints", [])
+        self.wrist_joint_indices = torch.zeros(len(wrist_joints), dtype=torch.long, device=self.device, requires_grad=False)
+        for i in range(len(wrist_joints)):
+            self.wrist_joint_indices[i] = self.dof_names.index(wrist_joints[i])
 
 
 
         self.arm_joint_indices = torch.cat((self.left_arm_joint_indices, self.right_arm_joint_indices))
             
-        self.waist_joint_indices = torch.zeros(len(self.cfg.asset.waist_joints), dtype=torch.long, device=self.device, requires_grad=False)
-        for i in range(len(self.cfg.asset.waist_joints)):
-            self.waist_joint_indices[i] = self.dof_names.index(self.cfg.asset.waist_joints[i])
+        # self.waist_joint_indices = torch.zeros(len(self.cfg.asset.waist_joints), dtype=torch.long, device=self.device, requires_grad=False)
+        # for i in range(len(self.cfg.asset.waist_joints)):
+        #     self.waist_joint_indices[i] = self.dof_names.index(self.cfg.asset.waist_joints[i])
             
         self.ankle_joint_indices = torch.zeros(len(self.cfg.asset.ankle_joints), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(self.cfg.asset.ankle_joints)):
@@ -1329,7 +1380,8 @@ class LeggedRobot(BaseTask):
         self.upper_body_index = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], self.cfg.control.upper_body_link)
         self.torso_index = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], self.cfg.control.torso_link)
             
-        self.keyframe_names = [s for s in body_names if self.cfg.asset.keyframe_name in s]
+        keyframe_token = getattr(self.cfg.asset, "keyframe_name", "")
+        self.keyframe_names = [s for s in body_names if keyframe_token and (keyframe_token in s)]
         self.keyframe_indices = torch.zeros(len(self.keyframe_names), dtype=torch.long, device=self.device)
         for i, name in enumerate(self.keyframe_names):
             self.keyframe_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], name)
