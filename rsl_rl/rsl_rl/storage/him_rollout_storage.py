@@ -95,7 +95,8 @@ class HIMRolloutStorage:
         if self.privileged_observations is not None: self.privileged_observations[self.step].copy_(transition.critic_observations)
         if self.next_privileged_observations is not None: self.next_privileged_observations[self.step].copy_(transition.next_critic_observations)
         self.actions[self.step].copy_(transition.actions)
-        self.amp_observations[self.step].copy_(transition.amp_observations)
+        if transition.amp_observations is not None:
+            self.amp_observations[self.step].copy_(transition.amp_observations)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
         self.values[self.step].copy_(transition.values)

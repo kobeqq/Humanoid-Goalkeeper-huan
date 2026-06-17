@@ -52,6 +52,25 @@ class TaskRegistry():
         self.task_classes[name] = task_class
         self.env_cfgs[name] = env_cfg
         self.train_cfgs[name] = train_cfg
+
+    def _apply_debug_env_overrides(self, env_cfg=None, train_cfg=None):
+        enabled = os.getenv("LEGGED_GYM_DEBUG_CUDA", "0") == "1"
+        if env_cfg is not None and enabled:
+            env_cfg.env.debug_cuda_checks = True
+            env_cfg.env.debug_dump_states = True
+        if env_cfg is not None and os.getenv("LEGGED_GYM_DISABLE_UPPER_DIST", "0") == "1":
+            if hasattr(env_cfg, "upper_body_disturbance"):
+                env_cfg.upper_body_disturbance.enable = False
+        if env_cfg is not None and os.getenv("LEGGED_GYM_DISABLE_DOMAIN_RAND", "0") == "1":
+            for name in dir(env_cfg.domain_rand):
+                if name.startswith("randomize_") or name in ("delay", "push_robots", "continue_keep"):
+                    setattr(env_cfg.domain_rand, name, False)
+        if env_cfg is not None and os.getenv("LEGGED_GYM_DISABLE_ACTION_DELAY", "0") == "1":
+            env_cfg.env.debug_disable_action_delay = True
+            if hasattr(env_cfg.domain_rand, "delay"):
+                env_cfg.domain_rand.delay = False
+        if train_cfg is not None and os.getenv("LEGGED_GYM_DISABLE_AMP", "0") == "1":
+            train_cfg.amp.enable_discriminator = False
     
     def get_task_class(self, name: str) -> VecEnv:
         return self.task_classes[name]
@@ -91,6 +110,7 @@ class TaskRegistry():
             env_cfg, _ = self.get_cfgs(name)
         # override cfg from args (if specified)
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
+        self._apply_debug_env_overrides(env_cfg=env_cfg)
         set_seed(env_cfg.seed)
         # parse sim params (convert to dict first)
         sim_params = {"sim": class_to_dict(env_cfg.sim)}
@@ -135,6 +155,7 @@ class TaskRegistry():
                 print(f"'train_cfg' provided -> Ignoring 'name={name}'")
         # override cfg from args (if specified)
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
+        self._apply_debug_env_overrides(train_cfg=train_cfg)
 
         if log_root=="default":
             log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)

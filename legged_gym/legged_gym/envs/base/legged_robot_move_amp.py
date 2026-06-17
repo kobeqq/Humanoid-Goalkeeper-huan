@@ -281,8 +281,9 @@ class LeggedRobotMoveAmp(LeggedRobot):
 
 #TODO: 随机扰动实验
     def _post_physics_step_callback(self):
+        push_interval = int(getattr(self.cfg.domain_rand, "push_interval", 0))
         if self.cfg.domain_rand.push_robots and (
-            self.common_step_counter % self.cfg.domain_rand.push_interval_s == 0
+            push_interval > 0 and self.common_step_counter % push_interval == 0
         ):
             self._push_robots()
 
@@ -444,5 +445,4 @@ class LeggedRobotMoveAmp(LeggedRobot):
         self.fall_buf = knee_height_buf | self.gravity_termination_buf | sharpforce_buf
         self.reset_buf = self.time_out_buf | self.fall_buf
         self.episode_fall = torch.maximum(self.episode_fall, self.fall_buf.float())
-
 

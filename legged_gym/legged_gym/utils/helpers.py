@@ -37,7 +37,11 @@ from isaacgym import gymapi
 from isaacgym import gymutil
 import torch
 import torch.nn.functional as F
-import onnxruntime as ort
+
+try:
+    import onnxruntime as ort
+except ModuleNotFoundError:
+    ort = None
 
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
@@ -72,7 +76,6 @@ def set_seed(seed):
     if seed == -1:
         seed = np.random.randint(0, 10000)
     print("Setting seed: {}".format(seed))
-    
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -187,6 +190,9 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             env_cfg.env.num_envs = args.num_envs
         if args.seed is not None:
             env_cfg.seed = args.seed
+        if getattr(args, "max_curriculum_stage", None) is not None:
+            if hasattr(env_cfg, "commands"):
+                env_cfg.commands.curriculum_initial_stage = args.max_curriculum_stage
     if cfg_train is not None:
         if args.seed is not None:
             cfg_train.seed = args.seed
@@ -222,6 +228,7 @@ def get_args():
         {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
+        {"name": "--max_curriculum_stage", "type": int, "help": "Max command curriculum stage."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
@@ -243,6 +250,8 @@ def export_policy_as_jit(actor_critic, path, policy_name):
     traced_script_module.save(path)
         
 def load_onnx_policy(path):
+    if ort is None:
+        raise ModuleNotFoundError("onnxruntime is required to load ONNX policies.")
     model = ort.InferenceSession(path)
     def run_inference(input_tensor):
         ort_inputs = {model.get_inputs()[0].name: input_tensor.cpu().numpy()}
@@ -266,7 +275,6 @@ def export_jit_to_onnx(jit_model, path, dummy_input):
     )
     print(f"Exported JIT model to ONNX at: {path}")
 
-    
 class PolicyOnnx(torch.nn.Module):
     def __init__(self, actor_critic):
         super().__init__()
@@ -318,4 +326,3 @@ class PolicyOnnx(torch.nn.Module):
         )    
 
 
-    

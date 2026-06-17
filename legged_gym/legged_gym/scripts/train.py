@@ -26,11 +26,27 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
+import os
+import sys
+import numpy as np
+from datetime import datetime
+
+_SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+_LEGGED_GYM_PACKAGE_ROOT = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
+_REPO_ROOT = os.path.dirname(_LEGGED_GYM_PACKAGE_ROOT)
+for _path in (_LEGGED_GYM_PACKAGE_ROOT, os.path.join(_REPO_ROOT, "rsl_rl")):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 from legged_gym import LEGGED_GYM_ROOT_DIR
-import numpy as np
-import os
-from datetime import datetime
+
+if not hasattr(np, "float"):
+    np.float = float  # type: ignore[attr-defined]
+
+if os.getenv("LEGGED_GYM_DEBUG_CUDA", "0") == "1":
+    os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+    os.environ.setdefault("TORCH_SHOW_CPP_STACKTRACES", "1")
 
 import isaacgym
 from legged_gym.envs import *

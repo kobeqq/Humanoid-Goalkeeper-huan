@@ -30,11 +30,15 @@
 
 from __future__ import annotations
 
-import git
 import os
 import pathlib
 import torch
 import numpy as np
+
+try:
+    import git
+except ModuleNotFoundError:
+    git = None
 
 
 def split_and_pad_trajectories(tensor, dones):
@@ -78,6 +82,9 @@ def unpad_trajectories(trajectories, masks):
     return trajectories.transpose(1, 0)[masks.transpose(1, 0)].view(-1, trajectories.shape[0], trajectories.shape[-1]).transpose(1, 0)
 
 def store_code_state(logdir, repositories) -> list:
+    if git is None:
+        print("[rsl_rl] GitPython is not installed; skipping git diff snapshot.")
+        return []
     git_log_dir = os.path.join(logdir, "git")
     os.makedirs(git_log_dir, exist_ok=True)
     file_paths = []

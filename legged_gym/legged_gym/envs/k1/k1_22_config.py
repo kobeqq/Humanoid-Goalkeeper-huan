@@ -394,8 +394,9 @@ class K122Cfg(LeggedRobotCfg):#TODO: 这个类是用于创建机器人环境
     class amp: #TODO: 这个类是用于定义amp
 
         obs_type = 'dof'
-        use_all_dofs = True
-        num_obs = 22 * 2  # (old and new)
+        use_all_dofs = False
+        use_leg_dofs = True
+        num_obs = 12 * 2  # 12 leg dofs x (old and new)
         amp_coef = 0.2
         num_steps = 2
 
@@ -413,7 +414,7 @@ class K122CfgPPO( LeggedRobotCfgPPO ): #TODO: 这个类是用于创建PPO算法
         run_name = 'goalkeepper_k1'
         experiment_name = 'k1'
         wandb_project = "goalkeepper_k1"
-        logger = 'wandb'
+        # logger = 'wandb'
         
         # load and resume
         resume = False  #是否从上次保存的模型继续训练

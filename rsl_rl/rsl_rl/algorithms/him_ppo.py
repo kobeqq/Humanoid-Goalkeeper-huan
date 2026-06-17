@@ -57,7 +57,8 @@ class HIMPPO:
                  smoothness_lower_bound=0.1,
                  amp=None,
                  amp_normalizer=None,
-                 motion_buffer=None
+                 motion_buffer=None,
+                 enable_discriminator=True,
                  ):
 
         self.device = device
@@ -87,14 +88,15 @@ class HIMPPO:
         self.smoothness_lower_bound = smoothness_lower_bound
 
         # amp
-        self.amp = deepcopy(amp).to(self.device)
+        self.enable_discriminator = enable_discriminator
+        self.amp = deepcopy(amp).to(self.device) if amp is not None else None
 
-        
-        params = [
-            {'params': self.actor_critic.parameters(), 'name': 'actor_critic'},
-            {'params': self.amp.trunk.parameters(), 'weight_decay': 10e-4, 'name': 'amp_trunk'},
-            {'params': self.amp.amp_linear.parameters(), 'weight_decay': 10e-2, 'name': 'amp_head'},
-        ]
+        params = [{'params': self.actor_critic.parameters(), 'name': 'actor_critic'}]
+        if self.enable_discriminator and self.amp is not None:
+            params.extend([
+                {'params': self.amp.trunk.parameters(), 'weight_decay': 10e-4, 'name': 'amp_trunk'},
+                {'params': self.amp.amp_linear.parameters(), 'weight_decay': 10e-2, 'name': 'amp_head'},
+            ])
 
         self.optimizer = optim.Adam(params, lr=learning_rate)
         self.amp_normalizer = amp_normalizer
@@ -158,6 +160,9 @@ class HIMPPO:
         mean_surrogate_loss = 0
         mean_est_loss = 0
         mean_region_loss = 0
+        amp_loss = 0.0
+        expert_loss = 0.0
+        policy_loss = 0.0
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
@@ -229,7 +234,7 @@ class HIMPPO:
                 loss += smooth_loss
 
                 # amp loss
-                if self.amp is not None:
+                if self.enable_discriminator and self.amp is not None:
                     # import ipdb; ipdb.set_trace()
 
                     # motion_ids = 3 * critic_obs_batch[:,self.actor_critic.num_one_step_obs + 3]

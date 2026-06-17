@@ -118,20 +118,127 @@ class LeggedRobot(BaseTask):
         self.num_amp_obs = cfg.amp.num_obs
         self.init_done = True
 
+    def _debug_cuda_enabled(self):
+        return bool(getattr(self.cfg.env, "debug_cuda_checks", False))
+
+    def _debug_dump_enabled(self):
+        return bool(getattr(self.cfg.env, "debug_dump_states", False))
+
+    def _debug_cuda_sync(self, label):
+        if not self._debug_cuda_enabled():
+            return
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            try:
+                torch.cuda.synchronize()
+            except RuntimeError as exc:
+                self._debug_dump_state(f"cuda_error_{label}")
+                raise RuntimeError(f"CUDA synchronize failed after {label}") from exc
+
+    def _debug_assert_finite(self, name, tensor):
+        if not self._debug_cuda_enabled() or tensor is None:
+            return
+        if not torch.is_tensor(tensor):
+            return
+        if not torch.isfinite(tensor).all():
+            self._debug_dump_state(f"nonfinite_{name}")
+            raise RuntimeError(f"Non-finite values detected in {name}, shape={tuple(tensor.shape)}")
+
+    def _debug_dump_state(self, label, extra=None):
+        if not self._debug_dump_enabled():
+            return
+        dump_dir = getattr(self.cfg.env, "debug_dump_dir", "/tmp/legged_gym_debug")
+        os.makedirs(dump_dir, exist_ok=True)
+        max_envs = int(getattr(self.cfg.env, "debug_dump_env_count", 16))
+        env_slice = slice(0, min(self.num_envs, max_envs))
+
+        def pack(value):
+            if torch.is_tensor(value):
+                return value.detach().cpu().clone()
+            return value
+
+        def pack_env(name):
+            value = getattr(self, name, None)
+            if value is None:
+                return None
+            return pack(value[env_slice])
+
+        delayed_actions = getattr(self, "delayed_actions", None)
+
+        payload = {
+            "label": label,
+            "num_envs": self.num_envs,
+            "num_actions": self.num_actions,
+            "num_dof": self.num_dof,
+            "common_step_counter": int(getattr(self, "common_step_counter", -1)),
+            "episode_length_buf": pack_env("episode_length_buf"),
+            "actions": pack_env("actions"),
+            "delayed_actions": pack(delayed_actions[:, env_slice]) if delayed_actions is not None else None,
+            "torques": pack_env("torques"),
+            "dof_pos": pack_env("dof_pos"),
+            "dof_vel": pack_env("dof_vel"),
+            "root_states": pack_env("root_states"),
+            "rigid_body_states": pack_env("rigid_body_states"),
+            "contact_forces": pack_env("contact_forces"),
+            "Kp_factors": pack_env("Kp_factors"),
+            "Kd_factors": pack_env("Kd_factors"),
+            "friction_coeffs": pack_env("friction_coeffs"),
+            "payload": pack_env("payload"),
+            "com_displacement": pack_env("com_displacement"),
+        }
+        if hasattr(self, "_debug_extra_dump_state"):
+            payload.update(self._debug_extra_dump_state(env_slice, pack))
+        if extra:
+            payload.update({key: pack(value) for key, value in extra.items()})
+        filename = f"{label}_step{payload['common_step_counter']}.pt".replace("/", "_")
+        torch.save(payload, os.path.join(dump_dir, filename))
+
+    def _debug_check_step_inputs(self, actions):
+        if not self._debug_cuda_enabled():
+            return
+        expected_shape = (self.num_envs, self.num_actions)
+        if tuple(actions.shape) != expected_shape:
+            raise RuntimeError(f"actions shape mismatch: got={tuple(actions.shape)} expected={expected_shape}")
+        if actions.device != torch.device(self.device):
+            raise RuntimeError(f"actions device mismatch: got={actions.device} expected={self.device}")
+        if actions.dtype != torch.float32:
+            raise RuntimeError(f"actions dtype mismatch: got={actions.dtype} expected=torch.float32")
+        self._debug_assert_finite("input_actions", actions)
+        self._debug_assert_finite("dof_pos_pre_step", self.dof_pos)
+        self._debug_assert_finite("dof_vel_pre_step", self.dof_vel)
+        self._debug_assert_finite("root_states_pre_step", self.root_states)
+        scale = self.cfg.control.action_scale
+        if torch.is_tensor(scale):
+            try:
+                torch.broadcast_shapes(tuple(actions.shape), tuple(scale.shape))
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"action_scale is not broadcastable with actions: "
+                    f"actions={tuple(actions.shape)} scale={tuple(scale.shape)}"
+                ) from exc
+
     def step(self, actions): #TODO: 这个函数是用于执行动作
         """ Apply actions, simulate, call self.post_physics_step()
 
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
+        self._debug_check_step_inputs(actions)
+        self._debug_cuda_sync("step_input")
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
     
         self.delayed_actions = self.actions.clone().view(1, self.num_envs, self.num_actions).repeat(self.cfg.control.decimation, 1, 1)
+        expected_delayed_shape = (self.cfg.control.decimation, self.num_envs, self.num_actions)
+        if self._debug_cuda_enabled() and tuple(self.delayed_actions.shape) != expected_delayed_shape:
+            raise RuntimeError(
+                f"delayed_actions shape mismatch: got={tuple(self.delayed_actions.shape)} "
+                f"expected={expected_delayed_shape}"
+            )
         delay_steps = torch.randint(0, self.cfg.control.decimation, (self.num_envs, 1), device=self.device)
-        if self.cfg.domain_rand.delay:
+        if self.cfg.domain_rand.delay and not getattr(self.cfg.env, "debug_disable_action_delay", False):
             for i in range(self.cfg.control.decimation):
                 self.delayed_actions[i] = self.last_actions + (self.actions - self.last_actions) * (i >= delay_steps)
+        self._debug_assert_finite("delayed_actions", self.delayed_actions)
                 
         # Randomize Joint Injections
         if self.cfg.domain_rand.randomize_joint_injection:
@@ -140,13 +247,23 @@ class LeggedRobot(BaseTask):
         # step physics and render each frame
         self.render()
         for _ in range(self.cfg.control.decimation):
+            if self._debug_cuda_enabled() and (_ < 0 or _ >= self.delayed_actions.shape[0]):
+                raise RuntimeError(f"delayed_actions index out of bounds: index={_}, shape={tuple(self.delayed_actions.shape)}")
             self.torques = self._compute_torques(self.delayed_actions[_]).view(self.torques.shape)
+            if self._debug_cuda_enabled() and tuple(self.torques.shape) != (self.num_envs, self.num_dof):
+                raise RuntimeError(f"torques shape mismatch: got={tuple(self.torques.shape)} expected={(self.num_envs, self.num_dof)}")
+            self._debug_assert_finite("torques", self.torques)
+            self._debug_cuda_sync(f"compute_torques_decimation_{_}")
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
             self.gym.simulate(self.sim)
+            self._debug_cuda_sync(f"gym_simulate_decimation_{_}")
             if self.device == 'cpu':
                 self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
+            self._debug_assert_finite("dof_pos_post_refresh", self.dof_pos)
+            self._debug_assert_finite("dof_vel_post_refresh", self.dof_vel)
         termination_ids, termination_priveleged_obs = self.post_physics_step()
+        self._debug_cuda_sync("post_physics_step")
 
         # return clipped obs, clipped states (None), rewards, dones and infos
         clip_obs = self.cfg.normalization.clip_observations
@@ -470,11 +587,14 @@ class LeggedRobot(BaseTask):
         self.up_axis_idx = 2 # 2 for z, 1 for y -> adapt gravity accordingly
         self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         start = time()
-        print("*"*80)
-        print("Start creating ground...")
+        verbose_init = getattr(self.cfg.env, "verbose_init", False)
+        if verbose_init:
+            print("*"*80)
+            print("Start creating ground...")
         self._create_ground_plane()
-        print("Finished creating ground. Time taken {:.2f} s".format(time() - start))
-        print("*"*80)
+        if verbose_init:
+            print("Finished creating ground. Time taken {:.2f} s".format(time() - start))
+            print("*"*80)
         self._create_envs()
 
         
@@ -572,7 +692,7 @@ class LeggedRobot(BaseTask):
         return props
 
     def _process_rigid_body_props(self, props, env_id):
-        if env_id==0:
+        if env_id == 0 and getattr(self.cfg.env, "verbose_init", False):
             sum = 0
             for i, p in enumerate(props):
                 sum += p.mass
@@ -862,7 +982,8 @@ class LeggedRobot(BaseTask):
         # all_states = gymtorch.wrap_tensor(actor_root_state).view(self.num_envs, 2,13)
         # self.root_states, self.ball_states = all_states[:, 0, :], all_states[:,1, :]
         actor_root_state = gymtorch.wrap_tensor(actor_root_state)
-        print("ROOT STATE SHAPE:", actor_root_state.shape, "NUM ENVS:", self.num_envs, "USE BALL:", self.use_ball_actor)
+        if getattr(self.cfg.env, "verbose_init", False):
+            print("ROOT STATE SHAPE:", actor_root_state.shape, "NUM ENVS:", self.num_envs, "USE BALL:", self.use_ball_actor)
         if self.use_ball_actor:
             all_states = actor_root_state.view(self.num_envs, 2, 13)
             self.root_states, self.ball_states = all_states[:, 0, :], all_states[:, 1, :]
@@ -945,13 +1066,19 @@ class LeggedRobot(BaseTask):
             self.amp_lower_dof_names = list(self.dof_names)
             self.amp_lower_dof_indices = torch.arange(self.num_dof, device=self.device, dtype=torch.long)
         else:
-            self.amp_lower_dof_names = [
-                "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
-                "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
-                "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
-                "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
-                "waist_yaw_joint",
-            ]
+            if getattr(self.cfg.amp, "use_leg_dofs", False):
+                self.amp_lower_dof_names = (
+                    list(self.cfg.control.left_leg_joints)
+                    + list(self.cfg.control.right_leg_joints)
+                )
+            else:
+                self.amp_lower_dof_names = [
+                    "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+                    "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+                    "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+                    "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+                    "waist_yaw_joint",
+                ]
             self.amp_lower_dof_indices = torch.tensor(
                 [self.dof_names.index(n) for n in self.amp_lower_dof_names],
                 device=self.device,
@@ -1034,7 +1161,8 @@ class LeggedRobot(BaseTask):
 
         for i in range(self.num_dof):
             name = self.dof_names[i]
-            print(f"Joint {self.gym.find_actor_dof_index(self.envs[0], self.actor_handles[0], name, gymapi.IndexDomain.DOMAIN_ACTOR)}: {name}")
+            if getattr(self.cfg.env, "verbose_init", False):
+                print(f"Joint {self.gym.find_actor_dof_index(self.envs[0], self.actor_handles[0], name, gymapi.IndexDomain.DOMAIN_ACTOR)}: {name}")
             angle = self.cfg.init_state.default_joint_angles[name]
             self.default_dof_pos[i] = angle
             found = False
@@ -1094,6 +1222,7 @@ class LeggedRobot(BaseTask):
 
 
         multidataset, mapping = load_imitation_dataset(self.cfg.dataset.folder.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),self.cfg.dataset.joint_mapping.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR))
+        motion_device = getattr(self.cfg.amp, "motion_device", self.device)
         self.motions = {}
         self.motion_ids = {}
         self.motion_time = {}
@@ -1102,9 +1231,21 @@ class LeggedRobot(BaseTask):
             # Here 'key' will be the dataset's key name, and 'dataset' is the actual data
 
             # Initialize the MotionLib class for the given dataset
-            self.motions[key] = MotionLib(multidataset[key], mapping, self.amp_lower_dof_names, self.keyframe_names,
-                                        self.cfg.dataset.frame_rate, self.cfg.dataset.min_time, self.device,
-                                        self.amp_obs_type)  
+            self.motions[key] = MotionLib(
+                multidataset[key],
+                mapping,
+                self.amp_lower_dof_names,
+                self.keyframe_names,
+                self.cfg.dataset.frame_rate,
+                self.cfg.dataset.min_time,
+                motion_device,
+                output_device=self.device,
+                amp_obs_type=self.amp_obs_type,
+                num_steps=getattr(self.cfg.amp, "num_steps", 2),
+                include_dof_vel=getattr(self.cfg.amp, "include_dof_vel", False),
+            )
+        if str(self.device).startswith("cuda"):
+            torch.cuda.empty_cache()
             
         # required_motion_keys = ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"]
         # if self.motions and any(k not in self.motions for k in required_motion_keys):
@@ -1199,7 +1340,8 @@ class LeggedRobot(BaseTask):
         self.num_ballobs = self.cfg.env.num_ballobs
         self.play = self.cfg.env.play
         self.use_ball_actor = getattr(self.cfg.env, "use_ball_actor", True)
-        print("USE BALL ACTOR:", self.use_ball_actor)
+        if getattr(self.cfg.env, "verbose_init", False):
+            print("USE BALL ACTOR:", self.use_ball_actor)
 
 
         ball_asset = None
@@ -1215,6 +1357,7 @@ class LeggedRobot(BaseTask):
         
         # save body names from the asset
         body_names = self.gym.get_asset_rigid_body_names(robot_asset)
+        self.body_names = list(body_names)
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
         self.num_bodies = len(body_names)
         self.num_dof = len(self.dof_names)
@@ -1308,6 +1451,8 @@ class LeggedRobot(BaseTask):
         self.knee_indices = torch.zeros(len(knee_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(knee_names)):
             self.knee_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], knee_names[i])
+        if getattr(self.cfg.env, "verbose_init", False):
+            print("KNEE BODY INDICES:", [(name, int(idx.item())) for name, idx in zip(knee_names, self.knee_indices)])
 
         self.hand_indices = torch.zeros(len(hand_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(hand_names)):
@@ -1321,6 +1466,8 @@ class LeggedRobot(BaseTask):
         self.contact_feet_indices = torch.zeros(len(contact_feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(contact_feet_names)):
             self.contact_feet_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], contact_feet_names[i])
+        if getattr(self.cfg.env, "verbose_init", False):
+            print("CONTACT FEET BODY INDICES:", [(name, int(idx.item())) for name, idx in zip(contact_feet_names, self.contact_feet_indices)])
 
 
         self.penalised_contact_indices = torch.zeros(len(penalized_contact_names), dtype=torch.long, device=self.device, requires_grad=False)

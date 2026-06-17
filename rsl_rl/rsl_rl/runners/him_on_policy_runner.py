@@ -33,7 +33,24 @@ import os
 from collections import deque
 import statistics
 
-from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
+except ModuleNotFoundError:
+    class TensorboardSummaryWriter:
+        def __init__(self, *args, **kwargs):
+            print("[rsl_rl] tensorboard is not installed; scalar logs will be skipped.")
+
+        def add_scalar(self, *args, **kwargs):
+            pass
+
+        def save_file(self, *args, **kwargs):
+            pass
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
 
 import torch
 
@@ -47,6 +64,23 @@ from copy import copy, deepcopy
 import warnings
 from rsl_rl.modules import AMP
 from rsl_rl.utils.utils import Normalizer
+
+
+class _MultiMotionBuffer:
+    def __init__(self, motion_buffers):
+        self.motion_buffers = list(motion_buffers)
+
+    def get_expert_obs(self, batch_size):
+        if len(self.motion_buffers) == 1:
+            return self.motion_buffers[0].get_expert_obs(batch_size=batch_size)
+        ids = torch.randint(len(self.motion_buffers), (batch_size,))
+        counts = torch.bincount(ids, minlength=len(self.motion_buffers))
+        batches = []
+        for idx, count in enumerate(counts.tolist()):
+            if count > 0:
+                batches.append(self.motion_buffers[idx].get_expert_obs(batch_size=count))
+        return torch.cat(batches, dim=0)
+
 
 class HIMOnPolicyRunner:
 
@@ -82,13 +116,53 @@ class HIMOnPolicyRunner:
 
         self.amp_cfg = train_cfg["amp"]
         self.amp_coef = self.amp_cfg['amp_coef']
-        amp = AMP(self.amp_cfg['num_obs'], self.amp_cfg['amp_coef'], device=self.device).to(self.device)
-        amp_normalizer = Normalizer(self.amp_cfg['num_obs'])
+        self.amp_scale = self.amp_cfg.get("amp_scale", self.amp_coef)
+        self.amp_reward_mode = self.amp_cfg.get("reward_mode", "mixture")
+        self.adaptive_amp_scale = self.amp_cfg.get("adaptive_amp_scale", False)
+        self.amp_target_fraction = self.amp_cfg.get("amp_target_fraction", self.amp_coef)
+        self.amp_scale_min = self.amp_cfg.get("amp_scale_min", 0.0)
+        self.amp_scale_max = self.amp_cfg.get("amp_scale_max", float("inf"))
+        self.amp_scale_ema_alpha = self.amp_cfg.get("amp_scale_ema_alpha", 1.0)
+        self.enable_discriminator = self.amp_cfg.get('enable_discriminator', True)
+        self.amp_log_network = self.amp_cfg.get("log_network", False)
+        if self.enable_discriminator:
+            amp = AMP(self.amp_cfg['num_obs'], self.amp_cfg['amp_coef'], device=self.device).to(self.device)
+            amp_normalizer = Normalizer(self.amp_cfg['num_obs'])
+            motions = getattr(self.env, "motions", {})
+            if not motions:
+                raise RuntimeError(
+                    "AMP discriminator is enabled, but env.motions is empty. "
+                    "Provide a motion dataset or set cfg.amp.enable_discriminator=False."
+                )
+            motion_buffer = _MultiMotionBuffer(motions.values())
+            print(
+                "[AMP] discriminator enabled: "
+                f"obs_dim={self.amp_cfg['num_obs']}, "
+                f"reward_mode={self.amp_reward_mode}, "
+                f"amp_coef={self.amp_coef}, amp_scale={self.amp_scale}, "
+                f"adaptive_amp_scale={self.adaptive_amp_scale}, "
+                f"num_motion_buffers={len(motions)}"
+            )
+            if self.amp_log_network:
+                print(f"[AMP] discriminator network:\n{amp}")
+        else:
+            amp = None
+            amp_normalizer = None
+            motion_buffer = None
+            if self.amp_cfg.get("verbose", False):
+                print("[AMP] discriminator disabled")
 
 
         alg_class = eval(self.cfg["algorithm_class_name"]) # HIMPPO
-        motion_buffer = next(iter(self.env.motions.values()))
-        self.alg: HIMPPO = alg_class(actor_critic,  amp=amp, amp_normalizer=amp_normalizer,motion_buffer=motion_buffer, device=self.device, **self.alg_cfg)
+        self.alg: HIMPPO = alg_class(
+            actor_critic,
+            amp=amp,
+            amp_normalizer=amp_normalizer,
+            motion_buffer=motion_buffer,
+            enable_discriminator=self.enable_discriminator,
+            device=self.device,
+            **self.alg_cfg,
+        )
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
@@ -127,7 +201,8 @@ class HIMOnPolicyRunner:
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
         obs = self.env.get_observations()
-        amp_state = self.env.get_amp_observations().to(self.device)
+        if self.enable_discriminator:
+            amp_state = self.env.get_amp_observations().to(self.device)
         privileged_obs = self.env.get_privileged_observations()
         critic_obs = privileged_obs if privileged_obs is not None else obs
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
@@ -151,7 +226,6 @@ class HIMOnPolicyRunner:
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
-                    old_amp_state = amp_state
                     obs, privileged_obs, raw_rewards, dones, infos, termination_ids, termination_privileged_obs = self.env.step(actions)
 
                     critic_obs = privileged_obs if privileged_obs is not None else obs
@@ -159,39 +233,51 @@ class HIMOnPolicyRunner:
                     termination_ids = termination_ids.to(self.device)
                     termination_privileged_obs = termination_privileged_obs.to(self.device)
 
-                    amp_state = self.env.get_amp_observations().to(self.device)
-                    amp_state_ = torch.cat([old_amp_state, amp_state], dim=1).to(self.device)
-                    self.alg.process_amp_state(amp_state_)
+                    if self.enable_discriminator:
+                        old_amp_state = amp_state
+                        amp_state = self.env.get_amp_observations().to(self.device)
+                        amp_state_ = torch.cat([old_amp_state, amp_state], dim=1).to(self.device)
+                        self.alg.process_amp_state(amp_state_)
+                        amp_reward = self.alg.amp.predict_reward(
+                            amp_state_, normalizer=self.alg.amp_normalizer
+                        ).squeeze(1) * 0.5
+                        if self.amp_reward_mode == "additive":
+                            if self.adaptive_amp_scale:
+                                raw_mag = raw_rewards.detach().abs().mean()
+                                amp_mag = amp_reward.detach().abs().mean().clamp(min=1e-6)
+                                target = min(max(float(self.amp_target_fraction), 0.0), 0.95)
+                                target_scale = (target / max(1.0 - target, 1e-6)) * raw_mag / amp_mag
+                                target_scale = torch.clamp(
+                                    target_scale,
+                                    min=float(self.amp_scale_min),
+                                    max=float(self.amp_scale_max),
+                                )
+                                alpha = min(max(float(self.amp_scale_ema_alpha), 0.0), 1.0)
+                                self.amp_scale = (1.0 - alpha) * float(self.amp_scale) + alpha * float(target_scale.item())
+                            rewards = raw_rewards + self.amp_scale * amp_reward
+                        else:
+                            rewards = amp_reward * self.amp_coef + raw_rewards * (1 - self.amp_coef)
+                    else:
+                        amp_reward = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+                        rewards = raw_rewards
 
-                    num_envs = obs.shape[0]
-                    # amp_reward = torch.zeros(num_envs, device=obs.device)
-                    amp_reward = self.alg.amp.predict_reward(amp_state_, normalizer=self.alg.amp_normalizer).squeeze(1) * 0.5
-
-                    # motion_ids = 3 * critic_obs[:,self.alg.actor_critic.num_one_step_obs + 3]  #这是
-                    # for motion_key, motion_val in zip(
-                    #     ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"],
-                    #     [0, 1, 2, 3, 4, 5]
-                    # ):
-                    #     mask = motion_ids == motion_val
-                    #     if mask.any():
-                    #         rew = self.alg.amp[motion_key].predict_reward(
-                    #             amp_state_[mask], normalizer=self.alg.amp_normalizer
-                    #         ).squeeze(1) * 0.5
-                    #         amp_reward[mask] = rew
-                    
- 
+                    if hasattr(self.env, "record_amp_reward"):
+                        self.env.record_amp_reward(amp_reward, active_mask=(dones <= 0))
 
                     next_critic_obs = critic_obs.clone().detach()
                     next_critic_obs[termination_ids] = termination_privileged_obs.clone().detach()
 
-                    rewards = amp_reward * self.amp_coef + raw_rewards * (1 - self.amp_coef)
-                    # rewards = amp_reward * self.amp_coef + raw_rewards
-                    
                     self.alg.process_env_step(rewards, dones, infos, next_critic_obs)
                 
                     if self.log_dir is not None:
                         # Book keeping
                         if 'episode' in infos:
+                            done_ids = (dones > 0).nonzero(as_tuple=False).flatten()
+                            if len(done_ids) > 0:
+                                episode_amp_reward = (
+                                    cur_amp_reward_sum[done_ids] + amp_reward[done_ids]
+                                ) / torch.clamp(cur_episode_length[done_ids] + 1.0, min=1.0)
+                                infos['episode']['amp_reward_mean'] = torch.mean(episode_amp_reward)
                             ep_infos.append(infos['episode'])
                         cur_reward_sum += rewards
                         cur_raw_reward_sum += raw_rewards
@@ -252,7 +338,7 @@ class HIMOnPolicyRunner:
                 value = torch.mean(infotensor)
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.actor_critic.std[0:10].mean()
+        mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
@@ -264,6 +350,7 @@ class HIMOnPolicyRunner:
         self.writer.add_scalar('Loss/amp_loss', locs['amp_loss'], locs['it'])
         self.writer.add_scalar('Loss/amp_expert_loss', locs['expert_loss'], locs['it'])
         self.writer.add_scalar('Loss/amp_policy_loss', locs['policy_loss'], locs['it'])
+        self.writer.add_scalar('Train/amp_scale', self.amp_scale, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -332,7 +419,7 @@ class HIMOnPolicyRunner:
                 value = torch.mean(infotensor)
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.actor_critic.std[0:10].mean()
+        mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 
         self.writer.add_scalar('Loss/action_loss, ', locs['action_loss'], locs['it'])

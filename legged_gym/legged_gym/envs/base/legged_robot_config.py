@@ -50,6 +50,7 @@ class LeggedRobotCfg(BaseConfig):
         episode_length_s = 3 # episode length in seconds
         ball_gravity = True
         play = False
+        verbose_init = False
 
 
     class terrain:
@@ -256,6 +257,7 @@ class LeggedRobotCfg(BaseConfig):
         obs_type = 'dof'
         num_obs = 29 * 2  # (old and new)
         amp_coef = 0.4
+        enable_discriminator = True
         num_steps = 2
 
     class normalization:

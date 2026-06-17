@@ -87,8 +87,10 @@ class MotionLib:
         fps=30,
         min_dt=0.1,
         device="cuda:0",
+        output_device=None,
         amp_obs_type="keyframe",
         num_steps=2,
+        include_dof_vel=False,
     ):
         if isinstance(device, str) and device.strip().lower() == "gpu":
             device = "cuda:0"
@@ -96,48 +98,57 @@ class MotionLib:
             device = torch.device(device)
         if device.type == "cuda" and not torch.cuda.is_available():
             device = torch.device("cpu")
-        self.device, self.fps = device, fps
+        if output_device is not None:
+            if not isinstance(output_device, torch.device):
+                output_device = torch.device(output_device)
+        else:
+            output_device = device
+        self.storage_device = device
+        self.device = output_device
+        self.fps = fps
         self.env_fps = 50
         self.num_steps = num_steps
+        self.include_dof_vel = include_dof_vel
         get_len = lambda x: list(x.values())[0].shape[0]
 
         datasets = [data for data in datasets if get_len(data) > max(math.ceil(min_dt * fps), 3)]
 
-        self.motion_len = torch.tensor([get_len(data) for data in datasets], dtype=torch.long, device=device)
+        self.motion_len = torch.tensor([get_len(data) for data in datasets], dtype=torch.long, device=self.device)
         self.num_motion, self.tot_len = self.motion_len.shape[0], self.motion_len.sum()
-        self.motion_sampling_prob = torch.ones(self.num_motion, dtype=torch.float, device=device)
+        self.motion_sampling_prob = torch.ones(self.num_motion, dtype=torch.float, device=self.device)
 
         # import ipdb; ipdb.set_trace()
         self.motion_end_ids = torch.cumsum(self.motion_len, dim=0)
         self.motion_start_ids = torch.nn.functional.pad(self.motion_end_ids, (1, -1), "constant", 0)
         
-        self.motion_base_rpy = torch.zeros(self.tot_len, 3, dtype=torch.float, device=device)
-        self.motion_base_pos = torch.zeros(self.tot_len, 3, dtype=torch.float, device=device)
-        self.motion_base_lin_vel = torch.zeros(self.tot_len, 3, dtype=torch.float, device=device)
-        self.motion_base_ang_vel = torch.zeros(self.tot_len, 3, dtype=torch.float, device=device)
-        self.motion_dof_pos = torch.zeros(self.tot_len, len(dof_names), dtype=torch.float, device=device)
-        self.motion_dof_vel = torch.zeros(self.tot_len, len(dof_names), dtype=torch.float, device=device)
-        self.motion_keyframe_pos = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=device)
-        self.motion_keyframe_rpy = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=device)
-        self.motion_keyframe_lin_vel = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=device)
-        self.motion_keyframe_ang_vel = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=device)
+        sd = self.storage_device
+        self.motion_base_rpy = torch.zeros(self.tot_len, 3, dtype=torch.float, device=sd)
+        self.motion_base_pos = torch.zeros(self.tot_len, 3, dtype=torch.float, device=sd)
+        self.motion_base_lin_vel = torch.zeros(self.tot_len, 3, dtype=torch.float, device=sd)
+        self.motion_base_ang_vel = torch.zeros(self.tot_len, 3, dtype=torch.float, device=sd)
+        self.motion_dof_pos = torch.zeros(self.tot_len, len(dof_names), dtype=torch.float, device=sd)
+        self.motion_dof_vel = torch.zeros(self.tot_len, len(dof_names), dtype=torch.float, device=sd)
+        self.motion_keyframe_pos = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=sd)
+        self.motion_keyframe_rpy = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=sd)
+        self.motion_keyframe_lin_vel = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=sd)
+        self.motion_keyframe_ang_vel = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=sd)
         
-        self.motion_keyframe_pos_local = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=device)
-        self.motion_keyframe_quat_local = torch.zeros(self.tot_len, len(keyframe_names), 4, dtype=torch.float, device=device)
+        self.motion_keyframe_pos_local = torch.zeros(self.tot_len, len(keyframe_names), 3, dtype=torch.float, device=sd)
+        self.motion_keyframe_quat_local = torch.zeros(self.tot_len, len(keyframe_names), 4, dtype=torch.float, device=sd)
 
         for i, traj in enumerate(tqdm(datasets)):
             start, end = self.motion_start_ids[i], self.motion_end_ids[i]
 
-            self.motion_base_pos[start:end] = torch.tensor(traj["base_position"], dtype=torch.float, device=device)
+            self.motion_base_pos[start:end] = torch.tensor(traj["base_position"], dtype=torch.float, device=sd)
             #! Note: Quat to RPY, not sure the correctness
-            self.motion_base_rpy[start:end] = torch.tensor(euler_from_quaternion(traj["base_pose"]), dtype=torch.float, device=device)   
+            self.motion_base_rpy[start:end] = torch.tensor(euler_from_quaternion(traj["base_pose"]), dtype=torch.float, device=sd)   
             self.motion_base_lin_vel[start:end-1] = (self.motion_base_pos[start+1:end] - self.motion_base_pos[start:end-1]) * self.fps
             self.motion_base_ang_vel[start:end-1] = (self.motion_base_rpy[start+1:end] - self.motion_base_rpy[start:end-1]) * self.fps
             self.motion_base_lin_vel[end-1:end] = self.motion_base_lin_vel[end-2:end-1]
             self.motion_base_ang_vel[end-1:end] = self.motion_base_ang_vel[end-2:end-1]
             
-            dof_pos = torch.tensor(traj["joint_position"], dtype=torch.float, device=device)
-            dof_vel = torch.tensor(traj["joint_velocity"], dtype=torch.float, device=device)
+            dof_pos = torch.tensor(traj["joint_position"], dtype=torch.float, device=sd)
+            dof_vel = torch.tensor(traj["joint_velocity"], dtype=torch.float, device=sd)
             for j, name in enumerate(dof_names):
                 if name in mapping.keys():
                     self.motion_dof_pos[start:end, j] = dof_pos[:, mapping[name]]
@@ -145,10 +156,10 @@ class MotionLib:
 
             for k, name in enumerate(keyframe_names):
                 # import ipdb; ipdb.set_trace()
-                self.motion_keyframe_pos[start:end, k] = torch.tensor(traj["link_position"][:, k], dtype=torch.float, device=device)
-                self.motion_keyframe_rpy[start:end, k] = torch.tensor(euler_from_quaternion(traj["link_oritentation"][:, k]), dtype=torch.float, device=device)
-                self.motion_keyframe_lin_vel[start:end, k] = torch.tensor(traj["lin_velocity"][:, k], dtype=torch.float, device=device)
-                self.motion_keyframe_ang_vel[start:end, k] = torch.tensor(traj["link_angular_velocity"][:, k], dtype=torch.float, device=device)
+                self.motion_keyframe_pos[start:end, k] = torch.tensor(traj["link_position"][:, k], dtype=torch.float, device=sd)
+                self.motion_keyframe_rpy[start:end, k] = torch.tensor(euler_from_quaternion(traj["link_oritentation"][:, k]), dtype=torch.float, device=sd)
+                self.motion_keyframe_lin_vel[start:end, k] = torch.tensor(traj["lin_velocity"][:, k], dtype=torch.float, device=sd)
+                self.motion_keyframe_ang_vel[start:end, k] = torch.tensor(traj["link_angular_velocity"][:, k], dtype=torch.float, device=sd)
             
             self.motion_keyframe_pos[start:end, :, 0:2] -= self.motion_base_pos[start:start+1, None, 0:2]
             self.motion_base_pos[start:end, 0:2] -= self.motion_base_pos[start:start+1, 0:2].clone()
@@ -187,7 +198,7 @@ class MotionLib:
         time_in_proportion = time_in_proportion.clamp(min_val, 1 - clip_tail_proportion)
 
         motion_ids = start_ids + torch.floor(time_in_proportion * (end_ids - start_ids)).long()
-        motion_dof = self.motion_dof_pos[motion_ids].view(batch_size, -1)
+        motion_dof = self._get_amp_dof_obs(motion_ids).view(batch_size, -1)
 
         ratio = self.fps / self.env_fps
         ratio *= torch.rand(batch_size, device=self.device) * 1.0 + 0.25  # Random ratio per sample
@@ -202,7 +213,27 @@ class MotionLib:
             ceil = torch.clamp(ceil, 0, max_idx)
 
             linear_ratio = (next_pos - floor).unsqueeze(-1)
-            motion_dof_next = self.motion_dof_pos[floor] * (1 - linear_ratio) + self.motion_dof_pos[ceil] * linear_ratio
+            floor_idx = floor.to(self.storage_device)
+            ceil_idx = ceil.to(self.storage_device)
+            lr = linear_ratio.to(self.storage_device)
+            motion_dof_pos_next = (
+                self.motion_dof_pos[floor_idx] * (1 - lr) + self.motion_dof_pos[ceil_idx] * lr
+            ).to(self.device)
+            if self.include_dof_vel:
+                motion_dof_vel_next = (
+                    self.motion_dof_vel[floor_idx] * (1 - lr) + self.motion_dof_vel[ceil_idx] * lr
+                ).to(self.device)
+                motion_dof_next = torch.cat((motion_dof_pos_next, motion_dof_vel_next), dim=-1)
+            else:
+                motion_dof_next = motion_dof_pos_next
             motion_dof = torch.cat([motion_dof, motion_dof_next], dim=-1).view(batch_size, -1)
 
-        return motion_dof
+        return motion_dof.to(self.device, non_blocking=True)
+
+    def _get_amp_dof_obs(self, frame_ids):
+        idx = frame_ids.to(self.storage_device)
+        dof_pos = self.motion_dof_pos[idx]
+        if not self.include_dof_vel:
+            return dof_pos.to(self.device)
+        dof_vel = self.motion_dof_vel[idx]
+        return torch.cat((dof_pos, dof_vel), dim=-1).to(self.device)
