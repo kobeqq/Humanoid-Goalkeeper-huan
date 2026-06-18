@@ -28,15 +28,21 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from re import L
+import numpy as np
+
+if not hasattr(np, "float"):
+    np.float = float
+
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .base.legged_robot import LeggedRobot
 from .base.legged_robot_move_amp import LeggedRobotMoveAmp
+from .base.legged_robot_move_amp_2d import LeggedRobotMoveAmp2D
 from .base.legged_robot_omni_move_amp import LeggedRobotOmniMoveAmp
 from .g1.g1_29_config import G129Cfg, G129CfgPPO
 from .k1.k1_22_config import K122Cfg, K122CfgPPO
 from .g1_loco_13.g1_loco_13_config import G1LOCO13Cfg, G1LOCO13CfgPPO
 from .k1.k1_move_amp_config import K1MoveAmpCfg, K1MoveAmpCfgPPO
+from .k1.k1_move_amp_2d_config import K1MoveAmp2DCfg, K1MoveAmp2DCfgPPO
 from .k1.k1_omni_move_amp_config import K1OmniMoveAmpCfg, K1OmniMoveAmpCfgPPO
 
 import os
@@ -48,4 +54,5 @@ task_registry.register( "g1_loco_amp13", LeggedRobot, G1LOCO13Cfg(), G1LOCO13Cfg
 
 task_registry.register( "k1", LeggedRobot, K122Cfg(), K122CfgPPO() )
 task_registry.register( "k1_move_amp", LeggedRobotMoveAmp, K1MoveAmpCfg(), K1MoveAmpCfgPPO() )
+task_registry.register( "k1_move_amp_2d", LeggedRobotMoveAmp2D, K1MoveAmp2DCfg(), K1MoveAmp2DCfgPPO() )
 task_registry.register( "k1_omni_move_amp", LeggedRobotOmniMoveAmp, K1OmniMoveAmpCfg(), K1OmniMoveAmpCfgPPO() )
