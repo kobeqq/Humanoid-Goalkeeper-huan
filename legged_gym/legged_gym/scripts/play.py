@@ -112,9 +112,13 @@ def inject_lower_loco_command(env, env_ids, vx=LOWER_LOCO_PLAY_VX, vy=LOWER_LOCO
     )
 
 
-def inject_loco_amp_commands(env):
-    env_ids = torch.arange(env.num_envs, device=env.device)
-    cmds = torch.tensor(
+def inject_loco_amp_commands(env, env_ids=None):
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    if len(env_ids) == 0:
+        return
+
+    base_cmds = torch.tensor(
         [
             [0.0, 0.0, 0.0],
             [0.3, 0.0, 0.0],
@@ -126,7 +130,9 @@ def inject_loco_amp_commands(env):
         dtype=torch.float,
         device=env.device,
     )
-    env.commands[env_ids] = cmds[: env.num_envs]
+    repeat = (len(env_ids) + base_cmds.shape[0] - 1) // base_cmds.shape[0]
+    cmds = base_cmds.repeat(repeat, 1)[: len(env_ids)]
+    env.commands[env_ids] = cmds
     env.command_time_left[env_ids] = 999.0
 
 
@@ -193,7 +199,7 @@ def play(args):
     elif args.task == "k1_loco_amp":
         inject_loco_amp_commands(env)
         obs = sync_play_obs(env)
-        print("[play] k1_loco_amp fixed commands:", env.commands[: env.num_envs].tolist())
+        print("[play] k1_loco_amp fixed commands:", env.commands[: min(env.num_envs, 10)].tolist())
     else:
         obs = env.get_observations()
 
@@ -236,7 +242,8 @@ def play(args):
             inject_omni_targets(env, reset_ids, omni_bins)
             obs = sync_play_obs(env)
         elif args.task == "k1_loco_amp" and torch.any(dones):
-            inject_loco_amp_commands(env)
+            reset_ids = (dones > 0).nonzero(as_tuple=False).flatten()
+            inject_loco_amp_commands(env, reset_ids)
             obs = sync_play_obs(env)
 
 

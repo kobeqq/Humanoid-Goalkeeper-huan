@@ -147,8 +147,9 @@ class HIMPPO:
         self.transition.clear()
         self.actor_critic.reset(dones)
 
-    def process_amp_state(self, amp_state):
+    def process_amp_state(self, amp_state, amp_motion_ids=None):
         self.transition.amp_observations = amp_state
+        self.transition.amp_motion_ids = amp_motion_ids
 
     def compute_returns(self, last_critic_obs):
         last_values= self.actor_critic.evaluate(last_critic_obs).detach()
@@ -167,7 +168,7 @@ class HIMPPO:
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
         for obs_batch, next_obs_batch, critic_obs_batch, actions_batch, next_critic_obs_batch, cont_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, amp_obs_batch in generator:
+            old_mu_batch, old_sigma_batch, amp_obs_batch, amp_motion_id_batch in generator:
 
                 # _, estball_batch, estregion_batch = self.actor_critic.act(obs_batch)
                 _, estball_batch = self.actor_critic.act(obs_batch)
@@ -277,7 +278,10 @@ class HIMPPO:
 
                                         
                     # amp_expert_obs_batch = self.amp_normalizer.normalize_torch(amp_expert_obs_batch_mask, self.device)
-                    amp_expert_obs_batch = self.motion_buffer.get_expert_obs(batch_size=amp_obs_batch.shape[0]).to(self.device)
+                    amp_expert_obs_batch = self.motion_buffer.get_expert_obs(
+                        batch_size=amp_obs_batch.shape[0],
+                        motion_ids=amp_motion_id_batch,
+                    ).to(self.device)
                     amp_expert_obs_batch = self.amp_normalizer.normalize_torch(amp_expert_obs_batch, self.device)
                     amp_obs_batch = self.amp_normalizer.normalize_torch(amp_obs_batch, self.device)
             

@@ -45,7 +45,7 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
     def _reinit_amp_motions_for_lower_body(self):
         self.amp_lower_dof_names = self.lower_body_dof_names
         self.amp_lower_dof_indices = self.lower_body_dof_indices
-        self.amp_obs_per_step = int(getattr(self.cfg.amp, "num_obs_per_step", 30))
+        self.amp_obs_per_step = int(getattr(self.cfg.amp, "num_obs_per_step", 32))
         multidataset, mapping = load_imitation_dataset(
             self.cfg.dataset.folder.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
             self.cfg.dataset.joint_mapping.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
@@ -89,6 +89,34 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
             raise RuntimeError("No positive-weight AMP motions for k1_loco_amp.")
         probs = torch.tensor(self.amp_motion_probs, dtype=torch.float)
         self.amp_motion_probs = probs / probs.sum().clamp(min=1e-6)
+        self._init_amp_command_motion_map()
+
+    def _init_amp_command_motion_map(self):
+        specs = getattr(self.cfg.commands, "motion_commands", {})
+        command_names = list(specs.keys())
+        explicit_map = getattr(self.cfg.amp, "command_motion_map", {}) or {}
+        motion_names = list(self.motions.keys())
+        self.amp_command_names = command_names
+        self.amp_command_motion_names = [
+            self._resolve_command_motion_name(name, explicit_map, motion_names)
+            for name in command_names
+        ]
+
+    @staticmethod
+    def _resolve_command_motion_name(command_name, explicit_map, motion_names):
+        if command_name in explicit_map:
+            return explicit_map[command_name]
+        lowered = command_name.lower()
+        motion_lowers = {name.lower(): name for name in motion_names}
+        if lowered in motion_lowers:
+            return motion_lowers[lowered]
+        if lowered.startswith("diagonal") and "diagonal" in motion_lowers:
+            return motion_lowers["diagonal"]
+        for name in motion_names:
+            name_lower = name.lower()
+            if lowered in name_lower or name_lower in lowered:
+                return name
+        return None
 
     @staticmethod
     def _motion_weight(name, weights):
@@ -203,6 +231,9 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
             self.base_ang_vel,
             self.projected_gravity,
         )
+
+    def get_amp_motion_ids(self):
+        return self.command_type_ids
 
     def post_physics_step(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)

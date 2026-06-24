@@ -47,6 +47,7 @@ class HIMRolloutStorage:
             self.action_sigma = None
             self.next_critic_observations = None
             self.amp_observations = None
+            self.amp_motion_ids = None
 
         def clear(self):
             self.__init__()
@@ -72,6 +73,7 @@ class HIMRolloutStorage:
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
         self.amp_observations = torch.zeros(num_transitions_per_env, num_envs, *amp_obs_shape, device=self.device)
+        self.amp_motion_ids = torch.full((num_transitions_per_env, num_envs, 1), -1, dtype=torch.long, device=self.device)
 
         # For PPO
         self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
@@ -97,6 +99,8 @@ class HIMRolloutStorage:
         self.actions[self.step].copy_(transition.actions)
         if transition.amp_observations is not None:
             self.amp_observations[self.step].copy_(transition.amp_observations)
+        if transition.amp_motion_ids is not None:
+            self.amp_motion_ids[self.step].copy_(transition.amp_motion_ids.view(-1, 1).long())
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
         self.values[self.step].copy_(transition.values)
@@ -146,6 +150,7 @@ class HIMRolloutStorage:
             next_critic_observations = observations
 
         amp_observations = self.amp_observations[:-1].flatten(0, 1)
+        amp_motion_ids = self.amp_motion_ids[:-1].flatten(0, 1).squeeze(-1)
         next_observations = self.observations[1:].flatten(0, 1)
         actions = self.actions[:-1].flatten(0, 1)
         values = self.values[:-1].flatten(0, 1)
@@ -169,6 +174,7 @@ class HIMRolloutStorage:
                 next_critic_observations_batch = next_critic_observations[batch_idx]
                 critic_observations_batch = critic_observations[batch_idx]
                 amp_obs_batch = amp_observations[batch_idx]
+                amp_motion_id_batch = amp_motion_ids[batch_idx]
                 actions_batch = actions[batch_idx]
                 target_values_batch = values[batch_idx]
                 returns_batch = returns[batch_idx]
@@ -177,4 +183,4 @@ class HIMRolloutStorage:
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
                 yield obs_batch, next_obs_batch, critic_observations_batch, actions_batch, next_critic_observations_batch, cont_batch, target_values_batch, advantages_batch, returns_batch,\
-                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, amp_obs_batch
+                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, amp_obs_batch, amp_motion_id_batch

@@ -26,17 +26,15 @@ def build_lower_body_amp_step_obs(q_leg, dq_leg, base_lin_vel, base_ang_vel, pro
     Shape:
         q_leg:             [N, 12]
         dq_leg:            [N, 12]
+        base_lin_vel:      [N, 3]
         base_ang_vel:      [N, 3]
         projected_gravity: [N, 3]
 
     Output:
-        [N, 30] = 12 q + 12 dq + 3 base angular velocity + 3 projected gravity
-
-    base_lin_vel is intentionally accepted for API compatibility but not used
-    in this first version.
+        [N, 32] = 12 q + 12 dq + 2 base linear velocity (xy) + 3 base angular
+        velocity + 3 projected gravity
     """
-    del base_lin_vel
-    return torch.cat((q_leg, dq_leg, base_ang_vel, projected_gravity), dim=-1)
+    return torch.cat((q_leg, dq_leg, base_lin_vel[:, :2], base_ang_vel, projected_gravity), dim=-1)
 
 
 def euler_from_quaternion(quat_angle):
@@ -263,6 +261,11 @@ class MotionLib:
         idx = frame_ids.to(self.storage_device)
         return self._get_projected_gravity_from_rpy(self.motion_base_rpy[idx]).to(self.device)
 
+    def _get_base_lin_vel_body(self, frame_ids):
+        idx = frame_ids.to(self.storage_device)
+        quat = euler_xyz_to_quat(self.motion_base_rpy[idx])
+        return quat_rotate_inverse(quat, self.motion_base_lin_vel[idx]).to(self.device)
+
     def _get_amp_obs_blend(self, floor_idx, ceil_idx, linear_ratio):
         dof_pos = (
             self.motion_dof_pos[floor_idx] * (1 - linear_ratio) + self.motion_dof_pos[ceil_idx] * linear_ratio
@@ -275,6 +278,15 @@ class MotionLib:
             dof_vel = torch.zeros_like(dof_pos)
 
         if self.amp_obs_type == "lower_body_state":
+            base_lin_vel_world = (
+                self.motion_base_lin_vel[floor_idx] * (1 - linear_ratio)
+                + self.motion_base_lin_vel[ceil_idx] * linear_ratio
+            )
+            base_rpy = (
+                self.motion_base_rpy[floor_idx] * (1 - linear_ratio)
+                + self.motion_base_rpy[ceil_idx] * linear_ratio
+            )
+            base_lin_vel = quat_rotate_inverse(euler_xyz_to_quat(base_rpy), base_lin_vel_world).to(self.device)
             base_ang_vel = (
                 self.motion_base_ang_vel[floor_idx] * (1 - linear_ratio)
                 + self.motion_base_ang_vel[ceil_idx] * linear_ratio
@@ -283,7 +295,7 @@ class MotionLib:
             return build_lower_body_amp_step_obs(
                 dof_pos,
                 dof_vel,
-                torch.zeros_like(base_ang_vel),
+                base_lin_vel,
                 base_ang_vel,
                 gravity,
             )
@@ -304,12 +316,13 @@ class MotionLib:
         idx = frame_ids.to(self.storage_device)
         q_leg = self.motion_dof_pos[idx].to(self.device)
         dq_leg = self.motion_dof_vel[idx].to(self.device) if self.include_dof_vel else torch.zeros_like(q_leg)
+        base_lin_vel = self._get_base_lin_vel_body(idx)
         base_ang_vel = self.motion_base_ang_vel[idx].to(self.device)
         projected_gravity = self._get_projected_gravity_from_rpy(self.motion_base_rpy[idx]).to(self.device)
         return build_lower_body_amp_step_obs(
             q_leg,
             dq_leg,
-            torch.zeros_like(base_ang_vel),
+            base_lin_vel,
             base_ang_vel,
             projected_gravity,
         )

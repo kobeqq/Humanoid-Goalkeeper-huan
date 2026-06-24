@@ -67,9 +67,10 @@ from rsl_rl.utils.utils import Normalizer
 
 
 class _MultiMotionBuffer:
-    def __init__(self, motion_buffers, probs=None, names=None):
+    def __init__(self, motion_buffers, probs=None, names=None, command_motion_names=None):
         self.motion_buffers = list(motion_buffers)
         self.names = list(names) if names is not None else [str(i) for i in range(len(self.motion_buffers))]
+        self.name_lowers = [name.lower() for name in self.names]
         if len(self.motion_buffers) == 0:
             raise RuntimeError("No AMP motion buffers were provided.")
         if probs is None:
@@ -83,17 +84,88 @@ class _MultiMotionBuffer:
         if torch.sum(self.probs) <= 0:
             raise RuntimeError("AMP motion sampling probabilities sum to zero.")
         self.probs = self.probs / self.probs.sum()
+        self.command_motion_names = list(command_motion_names) if command_motion_names is not None else None
+        self.command_buffer_indices = None
+        if self.command_motion_names is not None:
+            self.command_buffer_indices = [
+                self._resolve_motion_indices(name) for name in self.command_motion_names
+            ]
 
-    def get_expert_obs(self, batch_size):
+    def _resolve_motion_indices(self, motion_name):
+        if motion_name is None:
+            return []
+        names = motion_name if isinstance(motion_name, (list, tuple)) else [motion_name]
+        resolved = []
+        for name in names:
+            name_lower = str(name).lower()
+            exact = [i for i, candidate in enumerate(self.name_lowers) if candidate == name_lower]
+            partial = [
+                i for i, candidate in enumerate(self.name_lowers)
+                if name_lower in candidate or candidate in name_lower
+            ]
+            for idx in exact + partial:
+                if idx not in resolved:
+                    resolved.append(idx)
+        return resolved
+
+    def _sample_from_indices(self, batch_size, buffer_indices):
+        if len(buffer_indices) == 0:
+            return self._get_unconditional_expert_obs(batch_size)
+        if len(buffer_indices) == 1:
+            return self.motion_buffers[buffer_indices[0]].get_expert_obs(batch_size=batch_size)
+
+        local_probs = self.probs[buffer_indices]
+        local_probs = local_probs / local_probs.sum().clamp(min=1e-6)
+        selected = torch.multinomial(local_probs, batch_size, replacement=True)
+        counts = torch.bincount(selected, minlength=len(buffer_indices))
+        result = None
+        for local_idx, count in enumerate(counts.tolist()):
+            if count <= 0:
+                continue
+            rows = (selected == local_idx).nonzero(as_tuple=False).flatten()
+            sample = self.motion_buffers[buffer_indices[local_idx]].get_expert_obs(batch_size=count)
+            if result is None:
+                result = sample.new_empty(batch_size, sample.shape[-1])
+            result[rows.to(sample.device)] = sample
+        return result
+
+    def _get_unconditional_expert_obs(self, batch_size):
         if len(self.motion_buffers) == 1:
             return self.motion_buffers[0].get_expert_obs(batch_size=batch_size)
         ids = torch.multinomial(self.probs, batch_size, replacement=True)
         counts = torch.bincount(ids, minlength=len(self.motion_buffers))
-        batches = []
+        result = None
         for idx, count in enumerate(counts.tolist()):
             if count > 0:
-                batches.append(self.motion_buffers[idx].get_expert_obs(batch_size=count))
-        return torch.cat(batches, dim=0)
+                rows = (ids == idx).nonzero(as_tuple=False).flatten()
+                sample = self.motion_buffers[idx].get_expert_obs(batch_size=count)
+                if result is None:
+                    result = sample.new_empty(batch_size, sample.shape[-1])
+                result[rows.to(sample.device)] = sample
+        return result
+
+    def get_expert_obs(self, batch_size, motion_ids=None):
+        if motion_ids is None or self.command_buffer_indices is None:
+            return self._get_unconditional_expert_obs(batch_size)
+
+        motion_ids = motion_ids.detach().view(-1).long().cpu()
+        if motion_ids.numel() != batch_size:
+            return self._get_unconditional_expert_obs(batch_size)
+
+        result = None
+        for command_id in torch.unique(motion_ids).tolist():
+            rows = (motion_ids == command_id).nonzero(as_tuple=False).flatten()
+            count = rows.numel()
+            if count == 0:
+                continue
+            if 0 <= command_id < len(self.command_buffer_indices):
+                sample = self._sample_from_indices(count, self.command_buffer_indices[command_id])
+            else:
+                sample = self._get_unconditional_expert_obs(count)
+            if result is None:
+                result = sample.new_empty(batch_size, sample.shape[-1])
+            result[rows.to(sample.device)] = sample
+        return result
 
 
 class HIMOnPolicyRunner:
@@ -155,7 +227,13 @@ class HIMOnPolicyRunner:
                 motion_buffers = list(motions.values())
                 motion_probs = None
                 motion_names = list(motions.keys())
-            motion_buffer = _MultiMotionBuffer(motion_buffers, probs=motion_probs, names=motion_names)
+            command_motion_names = getattr(self.env, "amp_command_motion_names", None)
+            motion_buffer = _MultiMotionBuffer(
+                motion_buffers,
+                probs=motion_probs,
+                names=motion_names,
+                command_motion_names=command_motion_names,
+            )
             print(
                 "[AMP] discriminator enabled: "
                 f"obs_dim={self.amp_cfg['num_obs']}, "
@@ -166,6 +244,11 @@ class HIMOnPolicyRunner:
             )
             print(f"[AMP] motion buffers: {motion_buffer.names}")
             print(f"[AMP] motion probs: {motion_buffer.probs.tolist()}")
+            if command_motion_names is not None:
+                command_names = getattr(self.env, "amp_command_names", None)
+                if command_names is None:
+                    command_names = [str(i) for i in range(len(command_motion_names))]
+                print(f"[AMP] command motion map: {dict(zip(command_names, command_motion_names))}")
             if self.amp_log_network:
                 print(f"[AMP] discriminator network:\n{amp}")
         else:
@@ -205,6 +288,14 @@ class HIMOnPolicyRunner:
 
 
     
+    def _get_amp_motion_ids(self):
+        if hasattr(self.env, "get_amp_motion_ids"):
+            return self.env.get_amp_motion_ids().to(self.device).clone()
+        motion_ids = getattr(self.env, "command_type_ids", None)
+        if motion_ids is None:
+            return None
+        return motion_ids.to(self.device).clone()
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
         if self.log_dir is not None and self.writer is None:
@@ -248,6 +339,7 @@ class HIMOnPolicyRunner:
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
+                    amp_motion_ids = self._get_amp_motion_ids() if self.enable_discriminator else None
                     actions = self.alg.act(obs, critic_obs)
                     obs, privileged_obs, raw_rewards, dones, infos, termination_ids, termination_privileged_obs = self.env.step(actions)
 
@@ -260,9 +352,10 @@ class HIMOnPolicyRunner:
                         old_amp_state = amp_state
                         amp_state = self.env.get_amp_observations().to(self.device)
                         amp_state_ = torch.cat([old_amp_state, amp_state], dim=1).to(self.device)
-                        self.alg.process_amp_state(amp_state_)
+                        self.alg.process_amp_state(amp_state_, amp_motion_ids)
                         amp_reward = self.alg.amp.predict_reward(
-                            amp_state_, normalizer=self.alg.amp_normalizer
+                            amp_state_,
+                            normalizer=self.alg.amp_normalizer,
                         ).squeeze(1) * 0.5
                         if self.amp_reward_mode == "additive":
                             if self.adaptive_amp_scale:

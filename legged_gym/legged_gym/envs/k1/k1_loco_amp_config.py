@@ -24,13 +24,13 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         command_scale = [1.0 / max_vx, 1.0 / max_vy, 1.0 / max_wz]
         train_yaw_command = False
         motion_commands = {
-            "standing": {"prob": 0.25, "vx": [0.0, 0.0], "vy": [0.0, 0.0], "wz": [0.0, 0.0]},
-            "forward": {"prob": 0.18, "vx": [0.20, 0.35], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
+            "standing": {"prob": 0.12, "vx": [0.0, 0.0], "vy": [0.0, 0.0], "wz": [0.0, 0.0]},
+            "forward": {"prob": 0.22, "vx": [0.20, 0.35], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
             "backward": {"prob": 0.17, "vx": [-0.32, -0.18], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
-            "leftstep": {"prob": 0.14, "vx": [-0.04, 0.04], "vy": [0.18, 0.32], "wz": [0.0, 0.0]},
-            "rightstep": {"prob": 0.14, "vx": [-0.04, 0.04], "vy": [-0.32, -0.18], "wz": [0.0, 0.0]},
-            "diagonal_left": {"prob": 0.06, "vx": [0.18, 0.32], "vy": [0.12, 0.28], "wz": [0.0, 0.0]},
-            "diagonal_right": {"prob": 0.06, "vx": [0.18, 0.32], "vy": [-0.28, -0.12], "wz": [0.0, 0.0]},
+            "leftstep": {"prob": 0.16, "vx": [-0.04, 0.04], "vy": [0.18, 0.32], "wz": [0.0, 0.0]},
+            "rightstep": {"prob": 0.16, "vx": [-0.04, 0.04], "vy": [-0.32, -0.18], "wz": [0.0, 0.0]},
+            "diagonal_left": {"prob": 0.08, "vx": [0.18, 0.32], "vy": [0.12, 0.28], "wz": [0.0, 0.0]},
+            "diagonal_right": {"prob": 0.08, "vx": [0.18, 0.32], "vy": [-0.28, -0.12], "wz": [0.0, 0.0]},
         }
 
     class init_state(K1MoveAmpCfg.init_state):
@@ -67,23 +67,23 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
 
     class rewards(K1MoveAmpCfg.rewards):
         class scales:
-            tracking_lin_vel = 3.0
+            tracking_lin_vel = 4.5
             tracking_ang_vel = 0.5
             upright = 1.0
             height = 0.5
             yaw_stability = 0.5
-            stand_still = 0.5
+            stand_still = 0.3
             feet_slip = -0.05
             ang_vel_xy = -0.03
             dof_acc = -2.5e-7
-            smoothness = -0.01
+            smoothness = -0.004
             torques = -1e-5
             dof_vel = -5e-4
             dof_pos_limits = -1.5
-            dof_vel_limits = -0.2
-            torque_limits = -0.5
+            dof_vel_limits = -0.1
+            torque_limits = -0.2
 
-        tracking_sigma = 0.25
+        tracking_sigma = 0.14
         yaw_rate_sigma = 0.25
         yaw_sigma = 0.35
         yaw_limit = math.radians(45.0)
@@ -109,13 +109,22 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         use_leg_dofs = True
         include_dof_vel = True
         num_steps = 2
-        num_obs_per_step = 30
+        num_obs_per_step = 32
         num_obs = num_obs_per_step * num_steps
         enable_discriminator = True
         skip_base_motion_init = True
         amp_coef = 0.45
         reward_mode = "additive"
         amp_scale = 2.0
+        command_motion_map = {
+            "standing": "standing",
+            "forward": "forward",
+            "backward": "backward",
+            "leftstep": "leftstep",
+            "rightstep": "rightstep",
+            "diagonal_left": "diagonal",
+            "diagonal_right": "diagonal",
+        }
         adaptive_amp_scale = True
         amp_target_fraction = 0.40
         amp_scale_min = 0.2
@@ -128,7 +137,7 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         filter_motion_by_weight = True
         motion_weights = {
             "__default__": 0.0,
-            "standing": 0.35,
+            "standing": 0.15,
             "forward": 1.0,
             "backward": 1.0,
             "leftstep": 1.0,
