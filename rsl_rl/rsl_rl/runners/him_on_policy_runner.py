@@ -67,13 +67,27 @@ from rsl_rl.utils.utils import Normalizer
 
 
 class _MultiMotionBuffer:
-    def __init__(self, motion_buffers):
+    def __init__(self, motion_buffers, probs=None, names=None):
         self.motion_buffers = list(motion_buffers)
+        self.names = list(names) if names is not None else [str(i) for i in range(len(self.motion_buffers))]
+        if len(self.motion_buffers) == 0:
+            raise RuntimeError("No AMP motion buffers were provided.")
+        if probs is None:
+            self.probs = torch.ones(len(self.motion_buffers), dtype=torch.float)
+        else:
+            self.probs = torch.as_tensor(probs, dtype=torch.float).detach().cpu()
+        if self.probs.numel() != len(self.motion_buffers):
+            raise RuntimeError(
+                f"AMP motion prob length mismatch: probs={self.probs.numel()} buffers={len(self.motion_buffers)}"
+            )
+        if torch.sum(self.probs) <= 0:
+            raise RuntimeError("AMP motion sampling probabilities sum to zero.")
+        self.probs = self.probs / self.probs.sum()
 
     def get_expert_obs(self, batch_size):
         if len(self.motion_buffers) == 1:
             return self.motion_buffers[0].get_expert_obs(batch_size=batch_size)
-        ids = torch.randint(len(self.motion_buffers), (batch_size,))
+        ids = torch.multinomial(self.probs, batch_size, replacement=True)
         counts = torch.bincount(ids, minlength=len(self.motion_buffers))
         batches = []
         for idx, count in enumerate(counts.tolist()):
@@ -134,15 +148,24 @@ class HIMOnPolicyRunner:
                     "AMP discriminator is enabled, but env.motions is empty. "
                     "Provide a motion dataset or set cfg.amp.enable_discriminator=False."
                 )
-            motion_buffer = _MultiMotionBuffer(motions.values())
+            motion_buffers = getattr(self.env, "amp_motion_buffers", None)
+            motion_probs = getattr(self.env, "amp_motion_probs", None)
+            motion_names = getattr(self.env, "amp_motion_names", None)
+            if motion_buffers is None:
+                motion_buffers = list(motions.values())
+                motion_probs = None
+                motion_names = list(motions.keys())
+            motion_buffer = _MultiMotionBuffer(motion_buffers, probs=motion_probs, names=motion_names)
             print(
                 "[AMP] discriminator enabled: "
                 f"obs_dim={self.amp_cfg['num_obs']}, "
                 f"reward_mode={self.amp_reward_mode}, "
                 f"amp_coef={self.amp_coef}, amp_scale={self.amp_scale}, "
                 f"adaptive_amp_scale={self.adaptive_amp_scale}, "
-                f"num_motion_buffers={len(motions)}"
+                f"num_motion_buffers={len(motion_buffer.motion_buffers)}"
             )
+            print(f"[AMP] motion buffers: {motion_buffer.names}")
+            print(f"[AMP] motion probs: {motion_buffer.probs.tolist()}")
             if self.amp_log_network:
                 print(f"[AMP] discriminator network:\n{amp}")
         else:

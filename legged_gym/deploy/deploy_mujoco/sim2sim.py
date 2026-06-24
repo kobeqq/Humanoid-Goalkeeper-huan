@@ -2,6 +2,7 @@
 
 Supports:
 - K1 Move AMP (`LeggedRobotMoveAmp`, obs 75 x 10 = 750)
+- K1 Loco AMP (`LeggedRobotK1LocoAmp`, obs 65 x 10 = 650)
 - K1 Goalkeeper Foundation (`LeggedRobotGoalkeeperFoundation`, obs 86 x 10 = 860)
 """
 
@@ -176,6 +177,10 @@ def is_foundation_task(cfg):
     return cfg.get("task") == "goalkeeper_foundation"
 
 
+def is_loco_amp_task(cfg):
+    return cfg.get("task") == "k1_loco_amp"
+
+
 def get_trunk_body_state(d):
     """Trunk-frame lin/ang vel and projected gravity (matches K1 upper_body_link=Trunk)."""
     quat_xyzw = mujoco_quat_to_xyzw(d.qpos[3:7])
@@ -211,6 +216,38 @@ def apply_leg_only_targets(action, default_angles, action_scale, leg_indices):
     target = default_angles.copy()
     target[leg_indices] = action[leg_indices] * action_scale + default_angles[leg_indices]
     return target
+
+
+def apply_12d_leg_targets(action, default_angles, action_scale, leg_indices):
+    target = default_angles.copy()
+    if len(action) != len(leg_indices):
+        raise RuntimeError(
+            f"Expected 12-d leg action, got action={len(action)} leg_indices={len(leg_indices)}"
+        )
+    target[leg_indices] = default_angles[leg_indices] + action * action_scale
+    return target
+
+
+def build_loco_amp_one_step_obs(
+    d,
+    default_angles,
+    action,
+    command,
+    command_scale,
+    ang_vel_scale,
+    dof_pos_scale,
+    dof_vel_scale,
+):
+    quat_xyzw = mujoco_quat_to_xyzw(d.qpos[3:7])
+    base_angvel_world = d.qvel[3:6].astype(np.float32)
+    omega = quat_rotate_inverse_xyzw(quat_xyzw, base_angvel_world) * ang_vel_scale
+    gravity = quat_rotate_inverse_xyzw(
+        quat_xyzw, np.array([0.0, 0.0, -1.0], dtype=np.float32)
+    )
+    qj = (d.qpos[7:].astype(np.float32) - default_angles) * dof_pos_scale
+    dqj = d.qvel[6:].astype(np.float32) * dof_vel_scale
+    cmd_obs = np.asarray(command, dtype=np.float32) * np.asarray(command_scale, dtype=np.float32)
+    return np.concatenate((cmd_obs, omega, gravity, qj, dqj, action)).astype(np.float32)
 
 
 def build_foundation_one_step_obs(
@@ -470,10 +507,19 @@ def main():
         default=None,
         help="Foundation: inject execute command (vx, vy, goal_z, T_execute seconds)",
     )
+    parser.add_argument(
+        "--loco_cmd",
+        type=float,
+        nargs=3,
+        metavar=("VX", "VY", "WZ"),
+        default=None,
+        help="K1 loco AMP command: body-frame vx vy wz",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     foundation = is_foundation_task(cfg)
+    loco_amp = is_loco_amp_task(cfg)
 
     policy_path = resolve_policy_path(cfg, args.policy_path)
     xml_path = cfg["xml_path"]
@@ -519,15 +565,23 @@ def main():
         dtype=np.float32,
     )
     target_use_z = cfg.get("target_use_z", False)
+    loco_command = np.array(
+        args.loco_cmd if args.loco_cmd is not None else cfg.get("command_init", [0.0, 0.0, 0.0]),
+        dtype=np.float32,
+    )
+    command_scale = np.array(cfg.get("command_scale", [1.0, 1.0, 1.0]), dtype=np.float32)
 
     print(f"[INFO] Config: {args.config}")
-    print(f"[INFO] Task: {'goalkeeper_foundation' if foundation else 'move_amp'}")
+    print(f"[INFO] Task: {'goalkeeper_foundation' if foundation else 'k1_loco_amp' if loco_amp else 'move_amp'}")
     print(f"[INFO] Model: {xml_path}")
     print(f"[INFO] Policy: {policy_path}")
     print(f"[INFO] Obs: {num_one_step_obs} x {num_actor_history} = {num_obs}")
     if foundation:
         print(f"[INFO] Leg-only control indices: {leg_indices.tolist()}")
         print(f"[INFO] FSM auto_cycle={cfg.get('auto_cycle', True)}, episode={cfg.get('episode_length_s', 10.0)}s")
+    elif loco_amp:
+        print(f"[INFO] Loco command body-frame: {loco_command}")
+        print(f"[INFO] 12-d leg action indices: {leg_indices.tolist()}")
     else:
         print(f"[INFO] Target (world): {target_world}, use_z={target_use_z}")
     print(
@@ -586,6 +640,8 @@ def main():
     stdin_prompt = (
         "Set command (vx vy goal_z T_execute; goal_z<0 = standing height): "
         if foundation
+        else "Set loco command vx vy wz: "
+        if loco_amp
         else "Set goal (x, y, z) in world frame: "
     )
 
@@ -612,6 +668,13 @@ def main():
                             )
                         else:
                             raise ValueError
+                    elif loco_amp and len(parts) == 3:
+                        loco_command[:] = map(float, parts)
+                        print(
+                            f"Updated loco command: {loco_command}\n{stdin_prompt}",
+                            end="",
+                            flush=True,
+                        )
                     elif len(parts) == 3:
                         target_world[:] = map(float, parts)
                         print(
@@ -645,6 +708,17 @@ def main():
                         fsm.gait_phase(),
                         fsm.phase,
                     )
+                elif loco_amp:
+                    one_step_obs = build_loco_amp_one_step_obs(
+                        d,
+                        default_angles,
+                        action,
+                        loco_command,
+                        command_scale,
+                        ang_vel_scale,
+                        dof_pos_scale,
+                        dof_vel_scale,
+                    )
                 else:
                     one_step_obs = build_one_step_obs(
                         d,
@@ -670,6 +744,10 @@ def main():
                 action = smoothed_action
                 if foundation:
                     desired_target = apply_leg_only_targets(
+                        action, default_angles, action_scale, leg_indices
+                    )
+                elif loco_amp:
+                    desired_target = apply_12d_leg_targets(
                         action, default_angles, action_scale, leg_indices
                     )
                 else:

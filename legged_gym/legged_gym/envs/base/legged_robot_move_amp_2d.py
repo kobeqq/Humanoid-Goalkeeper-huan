@@ -129,10 +129,10 @@ class LeggedRobotMoveAmp2D(LeggedRobot):
                 mapping,
                 self.amp_lower_dof_names,
                 self.keyframe_names,
-                self.cfg.dataset.frame_rate,
-                self.cfg.dataset.min_time,
-                self.device,
-                amp_obs_type,
+                fps=self.cfg.dataset.frame_rate,
+                min_dt=self.cfg.dataset.min_time,
+                device=self.device,
+                amp_obs_type=amp_obs_type,
                 num_steps=num_steps,
                 include_dof_vel=True,
             )
@@ -492,10 +492,13 @@ class LeggedRobotMoveAmp2D(LeggedRobot):
         # base 高度/yaw 仍用默认站姿，不直接使用 motion 中的大 yaw 或 z（与仿真坐标系标定有关）。
         if ref_state is not None:
             ref_ids = env_ids[ref_mask]
-            self.dof_pos[ref_ids, self.lower_body_dof_indices] = ref_state["dof_pos"]
-            self.dof_vel[ref_ids, self.lower_body_dof_indices] = ref_state["dof_vel"]
-            self.dof_pos[ref_ids, self.upper_body_dof_indices] = self.default_dof_poses[ref_ids, self.upper_body_dof_indices]
-            self.dof_vel[ref_ids, self.upper_body_dof_indices] = 0.0
+            ref_rows = ref_ids[:, None]
+            lower_cols = self.lower_body_dof_indices[None, :]
+            upper_cols = self.upper_body_dof_indices[None, :]
+            self.dof_pos[ref_rows, lower_cols] = ref_state["dof_pos"]
+            self.dof_vel[ref_rows, lower_cols] = ref_state["dof_vel"]
+            self.dof_pos[ref_rows, upper_cols] = self.default_dof_poses[ref_rows, upper_cols]
+            self.dof_vel[ref_rows, upper_cols] = 0.0
 
         self.init_dof_pos[env_ids] = self.dof_pos[env_ids].clone()
         if getattr(self, "use_ball_actor", False):

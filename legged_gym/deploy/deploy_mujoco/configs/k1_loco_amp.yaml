@@ -1,0 +1,60 @@
+task: k1_loco_amp
+
+policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/k1_loco_amp/exported/policies/k1_loco_amp.pt"
+xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/k1/urdf/K1_22dof.xml"
+
+simulation_duration: 60.0
+simulation_dt: 0.005
+control_decimation: 4
+
+kps: [10, 10, 4, 4, 4, 4, 4, 4, 4, 4, 80, 80, 80, 80, 30, 30, 80, 80, 80, 80, 30, 30]
+kds: [2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+
+default_angles: [0.18, 0.22, -0.19, -1.28, 0.42, -1.61, -0.55, 1.36, 0.43, 1.52,
+                 -0.73, 0.0, -0.07, 0.76, -0.23, 0.09, -0.82, -0.14, 0.11, 0.79, -0.23, 0.06]
+
+init_joint_pos: [0.1842425, 0.2240987, -0.1946197, -1.2770557, 0.4178072, -1.6088617,
+                 -0.5537755, 1.3627010, 0.4302563, 1.5203257, -0.7325160, 0.0015820,
+                 -0.0698912, 0.7558325, -0.2323351, 0.0906837, -0.8220147, -0.1386372,
+                 0.1147351, 0.7931713, -0.2314957, 0.0641427]
+
+spawn_mode: isaac
+base_pos: [0.0, 0.0, 0.8]
+foot_contact_z: 0.0
+mujoco_iterations: 100
+kp_gain_scale: 1.5
+kd_gain_scale: 1.5
+action_smooth_factor: 0.0
+target_smooth_factor: 0.0
+soft_ground_contact: false
+torque_limits: [6, 6, 14, 14, 14, 14, 14, 14, 14, 14, 30, 35, 20, 40, 20, 20, 30, 35, 20, 40, 20, 20]
+
+warmup_steps: 0
+spawn_pose: init_joint_pos
+ground_friction: [1.0, 1.0]
+
+ang_vel_scale: 0.25
+dof_pos_scale: 1.0
+dof_vel_scale: 0.05
+action_scale: 0.25
+
+# actor obs: command 3 + ang_vel 3 + gravity 3 + dof_pos 22 + dof_vel 22 + action 12 = 65
+num_actions: 12
+num_one_step_obs: 65
+num_actor_history: 10
+num_obs: 650
+
+# action order:
+# [Left_Hip_Yaw, Left_Hip_Roll, Left_Hip_Pitch, Left_Knee_Pitch, Left_Ankle_Pitch, Left_Ankle_Roll,
+#  Right_Hip_Yaw, Right_Hip_Roll, Right_Hip_Pitch, Right_Knee_Pitch, Right_Ankle_Pitch, Right_Ankle_Roll]
+leg_joint_indices: [12, 11, 10, 13, 14, 15, 18, 17, 16, 19, 20, 21]
+
+command_init: [0.0, 0.0, 0.0]
+command_scale: [2.8571429, 2.8571429, 2.0]
+
+viewer_camera:
+  mode: tracking
+  body: Trunk
+  distance: 3.0
+  azimuth: 135
+  elevation: -15

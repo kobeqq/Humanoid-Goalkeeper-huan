@@ -13,10 +13,30 @@ from legged_gym.utils.math import (
     quat_mul_yaw,
     quat_mul,
     quat_apply,
+    quat_rotate_inverse,
 )
 # from isaacgym.torch_utils import quat_apply, normalize
 import copy
 import torch
+
+
+def build_lower_body_amp_step_obs(q_leg, dq_leg, base_lin_vel, base_ang_vel, projected_gravity):
+    """Build one-step lower-body AMP obs.
+
+    Shape:
+        q_leg:             [N, 12]
+        dq_leg:            [N, 12]
+        base_ang_vel:      [N, 3]
+        projected_gravity: [N, 3]
+
+    Output:
+        [N, 30] = 12 q + 12 dq + 3 base angular velocity + 3 projected gravity
+
+    base_lin_vel is intentionally accepted for API compatibility but not used
+    in this first version.
+    """
+    del base_lin_vel
+    return torch.cat((q_leg, dq_leg, base_ang_vel, projected_gravity), dim=-1)
 
 
 def euler_from_quaternion(quat_angle):
@@ -50,15 +70,15 @@ def load_imitation_dataset(folder, mapping="joint_id.txt", suffix=".pt"):
     multidataset = {}
     for filename in tqdm(filenames):
         try:
-            # Load the tensor data from each file
-            
-            dataset = {}
             data = torch.load(os.path.join(folder, filename))
-            dataset[filename[:-len(suffix)]] = data   #通过负向切片去掉了后缀名
-            # Use the filename without the suffix as the key in dataset
-            dataset_list = list(dataset.values()) #将dataset的值转换为列表
-            random.shuffle(dataset_list) #随机打乱列表
+            if isinstance(data, dict):
+                dataset_list = [data]
+            elif isinstance(data, list):
+                dataset_list = [traj for traj in data if isinstance(traj, dict)]
+            else:
+                raise TypeError(f"Unsupported motion file payload type: {type(data).__name__}")
 
+            random.shuffle(dataset_list)
             multidataset[filename[:-len(suffix)]] = dataset_list
 
         except Exception as e:
@@ -109,7 +129,8 @@ class MotionLib:
         self.env_fps = 50
         self.num_steps = num_steps
         self.include_dof_vel = include_dof_vel
-        get_len = lambda x: list(x.values())[0].shape[0]
+        datasets = self._normalize_datasets(datasets)
+        get_len = lambda x: x["base_position"].shape[0]
 
         datasets = [data for data in datasets if get_len(data) > max(math.ceil(min_dt * fps), 3)]
 
@@ -175,6 +196,18 @@ class MotionLib:
 
         self.amp_obs_type = amp_obs_type
 
+    @staticmethod
+    def _normalize_datasets(datasets):
+        normalized = []
+        for data in datasets:
+            if isinstance(data, dict):
+                normalized.append(data)
+            elif isinstance(data, list):
+                normalized.extend([traj for traj in data if isinstance(traj, dict)])
+            else:
+                raise TypeError(f"Unsupported motion entry type: {type(data).__name__}")
+        return normalized
+
 
     @staticmethod    
     def calc_blend(motion, time0, time1, w0, w1):
@@ -198,7 +231,7 @@ class MotionLib:
         time_in_proportion = time_in_proportion.clamp(min_val, 1 - clip_tail_proportion)
 
         motion_ids = start_ids + torch.floor(time_in_proportion * (end_ids - start_ids)).long()
-        motion_dof = self._get_amp_dof_obs(motion_ids).view(batch_size, -1)
+        motion_dof = self._get_amp_obs(motion_ids).view(batch_size, -1)
 
         ratio = self.fps / self.env_fps
         ratio *= torch.rand(batch_size, device=self.device) * 1.0 + 0.25  # Random ratio per sample
@@ -216,19 +249,48 @@ class MotionLib:
             floor_idx = floor.to(self.storage_device)
             ceil_idx = ceil.to(self.storage_device)
             lr = linear_ratio.to(self.storage_device)
-            motion_dof_pos_next = (
-                self.motion_dof_pos[floor_idx] * (1 - lr) + self.motion_dof_pos[ceil_idx] * lr
-            ).to(self.device)
-            if self.include_dof_vel:
-                motion_dof_vel_next = (
-                    self.motion_dof_vel[floor_idx] * (1 - lr) + self.motion_dof_vel[ceil_idx] * lr
-                ).to(self.device)
-                motion_dof_next = torch.cat((motion_dof_pos_next, motion_dof_vel_next), dim=-1)
-            else:
-                motion_dof_next = motion_dof_pos_next
+            motion_dof_next = self._get_amp_obs_blend(floor_idx, ceil_idx, lr)
             motion_dof = torch.cat([motion_dof, motion_dof_next], dim=-1).view(batch_size, -1)
 
         return motion_dof.to(self.device, non_blocking=True)
+
+    def _get_projected_gravity_from_rpy(self, rpy):
+        quat = euler_xyz_to_quat(rpy)
+        gravity = torch.tensor([0.0, 0.0, -1.0], dtype=torch.float, device=rpy.device).repeat(rpy.shape[0], 1)
+        return quat_rotate_inverse(quat, gravity)
+
+    def _project_gravity(self, frame_ids):
+        idx = frame_ids.to(self.storage_device)
+        return self._get_projected_gravity_from_rpy(self.motion_base_rpy[idx]).to(self.device)
+
+    def _get_amp_obs_blend(self, floor_idx, ceil_idx, linear_ratio):
+        dof_pos = (
+            self.motion_dof_pos[floor_idx] * (1 - linear_ratio) + self.motion_dof_pos[ceil_idx] * linear_ratio
+        ).to(self.device)
+        if self.include_dof_vel:
+            dof_vel = (
+                self.motion_dof_vel[floor_idx] * (1 - linear_ratio) + self.motion_dof_vel[ceil_idx] * linear_ratio
+            ).to(self.device)
+        else:
+            dof_vel = torch.zeros_like(dof_pos)
+
+        if self.amp_obs_type == "lower_body_state":
+            base_ang_vel = (
+                self.motion_base_ang_vel[floor_idx] * (1 - linear_ratio)
+                + self.motion_base_ang_vel[ceil_idx] * linear_ratio
+            ).to(self.device)
+            gravity = self._project_gravity(floor_idx)
+            return build_lower_body_amp_step_obs(
+                dof_pos,
+                dof_vel,
+                torch.zeros_like(base_ang_vel),
+                base_ang_vel,
+                gravity,
+            )
+
+        if self.include_dof_vel:
+            return torch.cat((dof_pos, dof_vel), dim=-1)
+        return dof_pos
 
     def _get_amp_dof_obs(self, frame_ids):
         idx = frame_ids.to(self.storage_device)
@@ -237,3 +299,39 @@ class MotionLib:
             return dof_pos.to(self.device)
         dof_vel = self.motion_dof_vel[idx]
         return torch.cat((dof_pos, dof_vel), dim=-1).to(self.device)
+
+    def _get_amp_lower_body_state_obs(self, frame_ids):
+        idx = frame_ids.to(self.storage_device)
+        q_leg = self.motion_dof_pos[idx].to(self.device)
+        dq_leg = self.motion_dof_vel[idx].to(self.device) if self.include_dof_vel else torch.zeros_like(q_leg)
+        base_ang_vel = self.motion_base_ang_vel[idx].to(self.device)
+        projected_gravity = self._get_projected_gravity_from_rpy(self.motion_base_rpy[idx]).to(self.device)
+        return build_lower_body_amp_step_obs(
+            q_leg,
+            dq_leg,
+            torch.zeros_like(base_ang_vel),
+            base_ang_vel,
+            projected_gravity,
+        )
+
+    def _get_amp_obs(self, frame_ids):
+        if self.amp_obs_type == "lower_body_state":
+            return self._get_amp_lower_body_state_obs(frame_ids)
+        return self._get_amp_dof_obs(frame_ids)
+
+    def sample_reference_state(self, batch_size, random_time=True):
+        motion_ids = torch.randint(0, self.num_motion, (batch_size,), device=self.device)
+        start_ids = self.motion_start_ids[motion_ids]
+        end_ids = self.motion_end_ids[motion_ids]
+        if random_time:
+            frame_ids = start_ids + torch.floor(
+                torch.rand(batch_size, device=self.device) * (end_ids - start_ids).float()
+            ).long()
+        else:
+            frame_ids = start_ids
+        idx = frame_ids.to(self.storage_device)
+        return {
+            "dof_pos": self.motion_dof_pos[idx].to(self.device),
+            "dof_vel": self.motion_dof_vel[idx].to(self.device),
+            "base_z": self.motion_base_pos[idx, 2].to(self.device),
+        }

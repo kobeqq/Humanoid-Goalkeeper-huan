@@ -1221,31 +1221,32 @@ class LeggedRobot(BaseTask):
 
 
 
-        multidataset, mapping = load_imitation_dataset(self.cfg.dataset.folder.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),self.cfg.dataset.joint_mapping.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR))
         motion_device = getattr(self.cfg.amp, "motion_device", self.device)
         self.motions = {}
         self.motion_ids = {}
         self.motion_time = {}
         self.motion_dict = {}
-        for key in multidataset.keys():
-            # Here 'key' will be the dataset's key name, and 'dataset' is the actual data
+        if not getattr(self.cfg.amp, "skip_base_motion_init", False):
+            multidataset, mapping = load_imitation_dataset(self.cfg.dataset.folder.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),self.cfg.dataset.joint_mapping.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR))
+            for key in multidataset.keys():
+                # Here 'key' will be the dataset's key name, and 'dataset' is the actual data
 
-            # Initialize the MotionLib class for the given dataset
-            self.motions[key] = MotionLib(
-                multidataset[key],
-                mapping,
-                self.amp_lower_dof_names,
-                self.keyframe_names,
-                self.cfg.dataset.frame_rate,
-                self.cfg.dataset.min_time,
-                motion_device,
-                output_device=self.device,
-                amp_obs_type=self.amp_obs_type,
-                num_steps=getattr(self.cfg.amp, "num_steps", 2),
-                include_dof_vel=getattr(self.cfg.amp, "include_dof_vel", False),
-            )
-        if str(self.device).startswith("cuda"):
-            torch.cuda.empty_cache()
+                # Initialize the MotionLib class for the given dataset
+                self.motions[key] = MotionLib(
+                    multidataset[key],
+                    mapping,
+                    self.amp_lower_dof_names,
+                    self.keyframe_names,
+                    self.cfg.dataset.frame_rate,
+                    self.cfg.dataset.min_time,
+                    motion_device,
+                    output_device=self.device,
+                    amp_obs_type=self.amp_obs_type,
+                    num_steps=getattr(self.cfg.amp, "num_steps", 2),
+                    include_dof_vel=getattr(self.cfg.amp, "include_dof_vel", False),
+                )
+            if str(self.device).startswith("cuda"):
+                torch.cuda.empty_cache()
             
         # required_motion_keys = ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"]
         # if self.motions and any(k not in self.motions for k in required_motion_keys):

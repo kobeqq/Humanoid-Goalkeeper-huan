@@ -21,7 +21,7 @@ def parse_args():
         "--task",
         type=str,
         default="k1_move_amp",
-        choices=["k1_move_amp", "k1_goalkeeper_foundation", "k1_goalkeeper_lower_loco", "k1"],
+        choices=["k1_move_amp", "k1_loco_amp", "k1_goalkeeper_foundation", "k1_goalkeeper_lower_loco", "k1"],
     )
     parser.add_argument("--num_envs", type=int, default=128)
     parser.add_argument("--steps", type=int, default=10)

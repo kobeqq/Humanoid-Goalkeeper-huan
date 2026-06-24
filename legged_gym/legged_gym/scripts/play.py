@@ -66,6 +66,20 @@ def configure_play_env(env_cfg, task_name: str):
         env_cfg.commands.stage_radius_ranges = [[OMNI_PLAY_RADIUS, OMNI_PLAY_RADIUS]]
         env_cfg.commands.yaw_ref_world = True
         env_cfg.commands.yaw_ref = 0.0
+    elif task_name == "k1_loco_amp":
+        env_cfg.env.num_envs = 6
+        env_cfg.env.episode_length_s = 6
+        env_cfg.domain_rand.randomize_joint_injection = False
+        env_cfg.domain_rand.randomize_actuation_offset = False
+        env_cfg.domain_rand.randomize_payload_mass = False
+        env_cfg.domain_rand.randomize_com_displacement = False
+        env_cfg.domain_rand.randomize_link_mass = False
+        env_cfg.domain_rand.randomize_friction = False
+        env_cfg.domain_rand.randomize_restitution = False
+        env_cfg.domain_rand.randomize_kp = False
+        env_cfg.domain_rand.randomize_kd = False
+        env_cfg.domain_rand.delay = False
+        env_cfg.domain_rand.push_robots = False
     else:
         env_cfg.env.episode_length_s = 3
         env_cfg.domain_rand.randomize_friction = True
@@ -96,6 +110,24 @@ def inject_lower_loco_command(env, env_ids, vx=LOWER_LOCO_PLAY_VX, vy=LOWER_LOCO
         duration_s=LOWER_LOCO_CMD_DURATION_S,
         disturbance_strength=0.0,
     )
+
+
+def inject_loco_amp_commands(env):
+    env_ids = torch.arange(env.num_envs, device=env.device)
+    cmds = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+            [-0.25, 0.0, 0.0],
+            [0.0, 0.25, 0.0],
+            [0.0, -0.25, 0.0],
+            [0.25, 0.20, 0.0],
+        ],
+        dtype=torch.float,
+        device=env.device,
+    )
+    env.commands[env_ids] = cmds[: env.num_envs]
+    env.command_time_left[env_ids] = 999.0
 
 
 def omni_direction_bins(env):
@@ -158,11 +190,15 @@ def play(args):
         obs = sync_play_obs(env)
         labels = [OMNI_DIRECTION_NAMES[int(i)] for i in omni_bins.detach().cpu().tolist()]
         print(f"[play] k1_omni_move_amp fixed targets radius={OMNI_PLAY_RADIUS}, dirs={labels}")
+    elif args.task == "k1_loco_amp":
+        inject_loco_amp_commands(env)
+        obs = sync_play_obs(env)
+        print("[play] k1_loco_amp fixed commands:", env.commands[: env.num_envs].tolist())
     else:
         obs = env.get_observations()
 
     if EXPORT_POLICY:
-        policy_name = "goalkeeper"
+        policy_name = args.task
         path = os.path.join(
             LEGGED_GYM_ROOT_DIR,
             "logs",
@@ -198,6 +234,9 @@ def play(args):
         elif args.task == "k1_omni_move_amp" and torch.any(dones):
             reset_ids = (dones > 0).nonzero(as_tuple=False).flatten()
             inject_omni_targets(env, reset_ids, omni_bins)
+            obs = sync_play_obs(env)
+        elif args.task == "k1_loco_amp" and torch.any(dones):
+            inject_loco_amp_commands(env)
             obs = sync_play_obs(env)
 
 
