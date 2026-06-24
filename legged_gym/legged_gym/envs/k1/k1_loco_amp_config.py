@@ -49,6 +49,7 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         com_displacement_range = [-0.02, 0.02]
         randomize_link_mass = True
         link_mass_range = [0.9, 1.1]
+        randomize_rigid_props_on_reset = False
         randomize_friction = True
         friction_range = [0.6, 1.5]
         randomize_restitution = False

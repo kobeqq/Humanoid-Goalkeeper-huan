@@ -283,13 +283,14 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         final_fall = self.episode_fall[env_ids].clone()
         final_amp_reward = self.episode_amp_reward_sum[env_ids].clone() / episode_lengths
 
-        self.refresh_actor_rigid_shape_props(env_ids)
-        if (
-            getattr(self.cfg.domain_rand, "randomize_payload_mass", False)
-            or getattr(self.cfg.domain_rand, "randomize_com_displacement", False)
-            or getattr(self.cfg.domain_rand, "randomize_link_mass", False)
-        ):
-            self.refresh_actor_rigid_body_props(env_ids)
+        if getattr(self.cfg.domain_rand, "randomize_rigid_props_on_reset", False):
+            self.refresh_actor_rigid_shape_props(env_ids)
+            if (
+                getattr(self.cfg.domain_rand, "randomize_payload_mass", False)
+                or getattr(self.cfg.domain_rand, "randomize_com_displacement", False)
+                or getattr(self.cfg.domain_rand, "randomize_link_mass", False)
+            ):
+                self.refresh_actor_rigid_body_props(env_ids)
 
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)

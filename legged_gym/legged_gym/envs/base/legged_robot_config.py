@@ -164,6 +164,7 @@ class LeggedRobotCfg(BaseConfig):
 
         randomize_link_mass = False
         link_mass_range = [0.7, 1.3]
+        randomize_rigid_props_on_reset = False
         
         randomize_friction = False
         friction_range = [0.1, 1.25]

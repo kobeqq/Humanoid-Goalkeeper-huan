@@ -633,21 +633,33 @@ class LeggedRobot(BaseTask):
         return props
     
     def refresh_actor_rigid_shape_props(self, env_ids): #TODO: 这个函数是用于刷新actor的刚体形状属性
+        # This path uses per-env Isaac Gym CPU APIs, so keep it off the hot reset path
+        # for large-batch training unless explicitly requested.
+        if torch.is_tensor(env_ids):
+            env_ids_list = env_ids.detach().cpu().tolist()
+        else:
+            env_ids_list = list(env_ids)
+        if len(env_ids_list) == 0:
+            return
+
         if self.cfg.domain_rand.randomize_friction:
             self.friction_coeffs[env_ids] = torch_rand_float(self.cfg.domain_rand.friction_range[0], self.cfg.domain_rand.friction_range[1], (len(env_ids), 1), device=self.device)
         if self.cfg.domain_rand.randomize_restitution:
             self.restitution_coeffs[env_ids] = torch_rand_float(self.cfg.domain_rand.restitution_range[0], self.cfg.domain_rand.restitution_range[1], (len(env_ids), 1), device=self.device)
-        
-        for env_id in env_ids:
+
+        friction_cpu = self.friction_coeffs.detach().cpu() if self.cfg.domain_rand.randomize_friction else None
+        restitution_cpu = self.restitution_coeffs.detach().cpu() if self.cfg.domain_rand.randomize_restitution else None
+
+        for env_id in env_ids_list:
             env_handle = self.envs[env_id]
             actor_handle = self.actor_handles[env_id]
             rigid_shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
 
             for i in range(len(rigid_shape_props)):
                 if self.cfg.domain_rand.randomize_friction:
-                    rigid_shape_props[i].friction = self.friction_coeffs[env_id, 0]
+                    rigid_shape_props[i].friction = float(friction_cpu[env_id, 0])
                 if self.cfg.domain_rand.randomize_restitution:
-                    rigid_shape_props[i].restitution = self.restitution_coeffs[env_id, 0]
+                    rigid_shape_props[i].restitution = float(restitution_cpu[env_id, 0])
                 
             self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, rigid_shape_props)
 
@@ -714,24 +726,43 @@ class LeggedRobot(BaseTask):
         return props
     
     def refresh_actor_rigid_body_props(self, env_ids): #TODO: 这个函数是用于刷新actor的刚体属性
+        # This path is intentionally CPU-oriented and expensive. Use sparingly and
+        # avoid enabling it for high-frequency large-batch resets.
+        if torch.is_tensor(env_ids):
+            env_ids_list = env_ids.detach().cpu().tolist()
+        else:
+            env_ids_list = list(env_ids)
+        if len(env_ids_list) == 0:
+            return
+
         if self.cfg.domain_rand.randomize_payload_mass:
             self.payload[env_ids] = torch_rand_float(self.cfg.domain_rand.payload_mass_range[0], self.cfg.domain_rand.payload_mass_range[1], (len(env_ids), 1), device=self.device)
             
         if self.cfg.domain_rand.randomize_com_displacement:
             self.com_displacement[env_ids] = torch_rand_float(self.cfg.domain_rand.com_displacement_range[0], self.cfg.domain_rand.com_displacement_range[1], (len(env_ids), 3), device=self.device)
-            
-        for env_id in env_ids:
+
+        payload_cpu = self.payload.detach().cpu() if self.cfg.domain_rand.randomize_payload_mass else None
+        com_cpu = self.com_displacement.detach().cpu() if self.cfg.domain_rand.randomize_com_displacement else None
+        default_mass_cpu = self.default_rigid_body_mass.detach().cpu()
+        rng = self.cfg.domain_rand.link_mass_range if self.cfg.domain_rand.randomize_link_mass else None
+
+        for env_id in env_ids_list:
             env_handle = self.envs[env_id]
             actor_handle = self.actor_handles[env_id]
             rigid_body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
-            rigid_body_props[0].mass = self.default_rigid_body_mass[0] + self.payload[env_id, 0]
-            rigid_body_props[0].com = gymapi.Vec3(self.com_displacement[env_id, 0], self.com_displacement[env_id, 1], self.com_displacement[env_id, 2])
+            if self.cfg.domain_rand.randomize_payload_mass:
+                rigid_body_props[0].mass = float(default_mass_cpu[0] + payload_cpu[env_id, 0])
+            if self.cfg.domain_rand.randomize_com_displacement:
+                rigid_body_props[0].com = gymapi.Vec3(
+                    float(com_cpu[env_id, 0]),
+                    float(com_cpu[env_id, 1]),
+                    float(com_cpu[env_id, 2]),
+                )
             
             if self.cfg.domain_rand.randomize_link_mass:
-                rng = self.cfg.domain_rand.link_mass_range
                 for i in range(1, len(rigid_body_props)):
                     scale = np.random.uniform(rng[0], rng[1])
-                    rigid_body_props[i].mass = scale * self.default_rigid_body_mass[i]
+                    rigid_body_props[i].mass = float(scale * default_mass_cpu[i])
             
             self.gym.set_actor_rigid_body_properties(env_handle, actor_handle, rigid_body_props, recomputeInertia=True)
 
