@@ -35,6 +35,20 @@ JOINT_ARMATURE = {
     "Right_Shoulder_Roll": 0.01,
     "Right_Elbow_Pitch": 0.01,
     "Right_Elbow_Yaw": 0.01,
+    # A slightly larger lower-body armature makes MuJoCo rollout less brittle for
+    # the Isaac-trained loco policy without changing the policy or joint order.
+    "Left_Hip_Pitch": 0.05,
+    "Left_Hip_Roll": 0.05,
+    "Left_Hip_Yaw": 0.05,
+    "Left_Knee_Pitch": 0.05,
+    "Left_Ankle_Pitch": 0.05,
+    "Left_Ankle_Roll": 0.05,
+    "Right_Hip_Pitch": 0.05,
+    "Right_Hip_Roll": 0.05,
+    "Right_Hip_Yaw": 0.05,
+    "Right_Knee_Pitch": 0.05,
+    "Right_Ankle_Pitch": 0.05,
+    "Right_Ankle_Roll": 0.05,
 }
 
 ACTUATOR_ORDER = [

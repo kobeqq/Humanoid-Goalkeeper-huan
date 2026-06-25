@@ -4,8 +4,8 @@ policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/k1_loco_amp/exported/policies/k1_loco_a
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/k1/urdf/K1_22dof.xml"
 
 simulation_duration: 60.0
-simulation_dt: 0.005
-control_decimation: 4
+simulation_dt: 0.0025
+control_decimation: 8
 
 kps: [10, 10, 4, 4, 4, 4, 4, 4, 4, 4, 80, 80, 80, 80, 30, 30, 80, 80, 80, 80, 30, 30]
 kds: [2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
@@ -18,20 +18,36 @@ init_joint_pos: [0.1842425, 0.2240987, -0.1946197, -1.2770557, 0.4178072, -1.608
                  -0.0698912, 0.7558325, -0.2323351, 0.0906837, -0.8220147, -0.1386372,
                  0.1147351, 0.7931713, -0.2314957, 0.0641427]
 
-spawn_mode: isaac
+spawn_mode: foot_contact
 base_pos: [0.0, 0.0, 0.8]
-foot_contact_z: 0.0
-mujoco_iterations: 100
-kp_gain_scale: 1.5
-kd_gain_scale: 1.5
-action_smooth_factor: 0.0
-target_smooth_factor: 0.0
-soft_ground_contact: false
+base_euler_rpy: [0.0, 0.10, 0.0]
+foot_contact_z: 0.005
+foot_contact_geom_names:
+  - left_foot_link_contact
+  - right_foot_link_contact
+mujoco_iterations: 200
+mujoco_integrator: euler
+dof_armature_scale: 1.0
+dof_damping_offset: 0.0
+kp_gain_scale: 1.0
+kd_gain_scale: 1.0
+action_smooth_factor: 0.9
+target_smooth_factor: 0.95
+policy_blend_steps: 800
+command_ramp_steps: 200
+soft_ground_contact: true
+allow_policy_autodetect: false
 torque_limits: [6, 6, 14, 14, 14, 14, 14, 14, 14, 14, 30, 35, 20, 40, 20, 20, 30, 35, 20, 40, 20, 20]
 
-warmup_steps: 0
+warmup_steps: 200
 spawn_pose: init_joint_pos
 ground_friction: [1.0, 1.0]
+reference_init_enabled: false
+reference_init_dataset_dir: "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper_from_pkl_k1_locomotion"
+reference_init_joint_mapping: "{LEGGED_GYM_ROOT_DIR}/resources/datasets/goalkeeper_from_pkl_k1_locomotion/joint_id_k1.txt"
+reference_init_frame_index: 0
+status_print_interval_s: 1.0
+fall_diag_height: 0.22
 
 ang_vel_scale: 0.25
 dof_pos_scale: 1.0

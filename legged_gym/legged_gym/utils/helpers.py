@@ -229,6 +229,9 @@ def get_args():
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
         {"name": "--max_curriculum_stage", "type": int, "help": "Max command curriculum stage."},
+        {"name": "--play_vx", "type": float, "help": "Fixed play command velocity in body x direction."},
+        {"name": "--play_vy", "type": float, "help": "Fixed play command velocity in body y direction."},
+        {"name": "--play_wz", "type": float, "help": "Fixed play command yaw rate."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
@@ -324,5 +327,4 @@ class PolicyOnnx(torch.nn.Module):
             output_names=["actions"],
             dynamic_axes={},
         )    
-
 

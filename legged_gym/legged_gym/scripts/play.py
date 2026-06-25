@@ -94,6 +94,17 @@ def sync_play_obs(env):
     return env.get_observations()
 
 
+def get_fixed_play_command(args, default=None):
+    values = [
+        getattr(args, "play_vx", None),
+        getattr(args, "play_vy", None),
+        getattr(args, "play_wz", None),
+    ]
+    if all(value is None for value in values):
+        return default
+    return tuple(0.0 if value is None else float(value) for value in values)
+
+
 def inject_lower_loco_command(env, env_ids, vx=LOWER_LOCO_PLAY_VX, vy=LOWER_LOCO_PLAY_VY):
     if not hasattr(env, "begin_eval_command"):
         return
@@ -112,26 +123,55 @@ def inject_lower_loco_command(env, env_ids, vx=LOWER_LOCO_PLAY_VX, vy=LOWER_LOCO
     )
 
 
-def inject_loco_amp_commands(env, env_ids=None):
+def infer_loco_amp_command_name(command):
+    vx, vy, wz = [float(value) for value in command]
+    if max(abs(vx), abs(vy), abs(wz)) < 0.05:
+        return "standing"
+    if vx > 0.05 and abs(vy) > 0.05:
+        return "diagonal_left" if vy > 0.0 else "diagonal_right"
+    if abs(vx) >= abs(vy):
+        return "forward" if vx >= 0.0 else "backward"
+    return "leftstep" if vy >= 0.0 else "rightstep"
+
+
+def set_loco_amp_command_type(env, env_ids, command):
+    if not hasattr(env, "command_type_ids"):
+        return
+    command_names = getattr(env, "amp_command_names", None)
+    if command_names is None and hasattr(env.cfg.commands, "motion_commands"):
+        command_names = list(env.cfg.commands.motion_commands.keys())
+    if not command_names:
+        return
+    command_name = infer_loco_amp_command_name(command)
+    if command_name in command_names:
+        env.command_type_ids[env_ids] = int(command_names.index(command_name))
+
+
+def inject_loco_amp_commands(env, env_ids=None, command=None):
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
     if len(env_ids) == 0:
         return
 
-    base_cmds = torch.tensor(
-        [
-            [0.0, 0.0, 0.0],
-            [0.3, 0.0, 0.0],
-            [-0.25, 0.0, 0.0],
-            [0.0, 0.25, 0.0],
-            [0.0, -0.25, 0.0],
-            [0.25, 0.20, 0.0],
-        ],
-        dtype=torch.float,
-        device=env.device,
-    )
-    repeat = (len(env_ids) + base_cmds.shape[0] - 1) // base_cmds.shape[0]
-    cmds = base_cmds.repeat(repeat, 1)[: len(env_ids)]
+    if command is None:
+        base_cmds = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [0.3, 0.0, 0.0],
+                [-0.25, 0.0, 0.0],
+                [0.0, 0.25, 0.0],
+                [0.0, -0.25, 0.0],
+                [0.25, 0.20, 0.0],
+            ],
+            dtype=torch.float,
+            device=env.device,
+        )
+        repeat = (len(env_ids) + base_cmds.shape[0] - 1) // base_cmds.shape[0]
+        cmds = base_cmds.repeat(repeat, 1)[: len(env_ids)]
+    else:
+        cmd = torch.tensor(command, dtype=torch.float, device=env.device).view(1, 3)
+        cmds = cmd.repeat(len(env_ids), 1)
+        set_loco_amp_command_type(env, env_ids, command)
     env.commands[env_ids] = cmds
     env.command_time_left[env_ids] = 999.0
 
@@ -180,13 +220,18 @@ def play(args):
         env=env, name=args.task, args=args, train_cfg=train_cfg
     )
     policy = ppo_runner.get_inference_policy(device=env.device)
+    fixed_play_command = get_fixed_play_command(args)
 
     if args.task == "k1_goalkeeper_lower_loco":
         env_ids = torch.arange(env.num_envs, device=env.device)
-        inject_lower_loco_command(env, env_ids)
+        lower_loco_command = get_fixed_play_command(
+            args,
+            default=(LOWER_LOCO_PLAY_VX, LOWER_LOCO_PLAY_VY, 0.0),
+        )
+        inject_lower_loco_command(env, env_ids, vx=lower_loco_command[0], vy=lower_loco_command[1])
         obs = sync_play_obs(env)
         print(
-            f"[play] fixed command vx={LOWER_LOCO_PLAY_VX}, vy={LOWER_LOCO_PLAY_VY}, "
+            f"[play] fixed command vx={lower_loco_command[0]}, vy={lower_loco_command[1]}, "
             f"mode=LOCO, num_envs={env.num_envs}"
         )
     elif args.task == "k1_omni_move_amp":
@@ -197,9 +242,12 @@ def play(args):
         labels = [OMNI_DIRECTION_NAMES[int(i)] for i in omni_bins.detach().cpu().tolist()]
         print(f"[play] k1_omni_move_amp fixed targets radius={OMNI_PLAY_RADIUS}, dirs={labels}")
     elif args.task == "k1_loco_amp":
-        inject_loco_amp_commands(env)
+        inject_loco_amp_commands(env, command=fixed_play_command)
         obs = sync_play_obs(env)
-        print("[play] k1_loco_amp fixed commands:", env.commands[: min(env.num_envs, 10)].tolist())
+        if fixed_play_command is None:
+            print("[play] k1_loco_amp fixed commands:", env.commands[: min(env.num_envs, 10)].tolist())
+        else:
+            print(f"[play] k1_loco_amp uniform command: {fixed_play_command}, num_envs={env.num_envs}")
     else:
         obs = env.get_observations()
 
@@ -235,7 +283,7 @@ def play(args):
 
         if args.task == "k1_goalkeeper_lower_loco" and torch.any(dones):
             reset_ids = (dones > 0).nonzero(as_tuple=False).flatten()
-            inject_lower_loco_command(env, reset_ids)
+            inject_lower_loco_command(env, reset_ids, vx=lower_loco_command[0], vy=lower_loco_command[1])
             obs = sync_play_obs(env)
         elif args.task == "k1_omni_move_amp" and torch.any(dones):
             reset_ids = (dones > 0).nonzero(as_tuple=False).flatten()
@@ -243,7 +291,7 @@ def play(args):
             obs = sync_play_obs(env)
         elif args.task == "k1_loco_amp" and torch.any(dones):
             reset_ids = (dones > 0).nonzero(as_tuple=False).flatten()
-            inject_loco_amp_commands(env, reset_ids)
+            inject_loco_amp_commands(env, reset_ids, command=fixed_play_command)
             obs = sync_play_obs(env)
 
 

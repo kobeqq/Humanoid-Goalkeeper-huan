@@ -7,9 +7,9 @@ Supports:
 """
 
 import argparse
-import glob
 import math
 import os
+import random
 import select
 import sys
 import time
@@ -30,6 +30,22 @@ PHASE_EXECUTE = 1
 PHASE_RECOVER = 2
 
 DEFAULT_LEG_JOINT_INDICES = list(range(10, 22))
+DEFAULT_FOOT_CONTACT_GEOM_NAMES = ["left_foot_link_contact", "right_foot_link_contact"]
+DEFAULT_FOOT_BODY_NAMES = ["left_foot_link", "right_foot_link"]
+DEFAULT_LOCO_LEG_JOINT_NAMES = [
+    "Left_Hip_Yaw",
+    "Left_Hip_Roll",
+    "Left_Hip_Pitch",
+    "Left_Knee_Pitch",
+    "Left_Ankle_Pitch",
+    "Left_Ankle_Roll",
+    "Right_Hip_Yaw",
+    "Right_Hip_Roll",
+    "Right_Hip_Pitch",
+    "Right_Knee_Pitch",
+    "Right_Ankle_Pitch",
+    "Right_Ankle_Roll",
+]
 
 
 def quat_rotate_inverse_xyzw(q, v):
@@ -46,23 +62,92 @@ def mujoco_quat_to_xyzw(quat_wxyz):
     return np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
 
 
+def euler_rpy_to_quat_wxyz(roll, pitch, yaw):
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    return np.array(
+        [
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        ],
+        dtype=np.float64,
+    )
+
+
 def compute_torques(joint_pos_target, dof_pos, dof_vel, p_gains, d_gains):
     return p_gains * (joint_pos_target - dof_pos) - d_gains * dof_vel
 
 
+def get_geom_id_by_name(model, name):
+    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+
+
+def get_body_id_by_name(model, name):
+    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+
+
 def get_foot_body_ids(model):
-    return [
-        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
-        for name in ("left_foot_link", "right_foot_link")
-    ]
+    return [get_body_id_by_name(model, name) for name in DEFAULT_FOOT_BODY_NAMES]
 
 
 def min_foot_height(model, data, foot_ids):
-    return float(min(data.xpos[i, 2] for i in foot_ids))
+    valid_ids = [i for i in foot_ids if i >= 0]
+    if not valid_ids:
+        return float("nan")
+    return float(min(data.xpos[i, 2] for i in valid_ids))
+
+
+def geom_min_z(model, data, geom_id):
+    geom_type = model.geom_type[geom_id]
+    center = data.geom_xpos[geom_id]
+    rotation = data.geom_xmat[geom_id].reshape(3, 3)
+    size = model.geom_size[geom_id]
+
+    if geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+        return float(center[2] - np.dot(np.abs(rotation[2, :]), size[:3]))
+
+    if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+        return float(center[2] - size[0])
+
+    if geom_type in (mujoco.mjtGeom.mjGEOM_CAPSULE, mujoco.mjtGeom.mjGEOM_CYLINDER):
+        radius = size[0]
+        half_length = size[1]
+        axis_z = abs(rotation[2, 2])
+        radial_z = math.sqrt(max(0.0, 1.0 - axis_z * axis_z))
+        return float(center[2] - axis_z * half_length - radial_z * radius)
+
+    return float(center[2])
+
+
+def min_named_geoms_z(model, data, geom_names):
+    found = []
+    for name in geom_names:
+        geom_id = get_geom_id_by_name(model, name)
+        if geom_id >= 0:
+            found.append((name, geom_id, geom_min_z(model, data, geom_id)))
+    if not found:
+        return None, []
+    return float(min(item[2] for item in found)), found
+
+
+def adjust_base_height_to_foot_contact(model, data, foot_geom_names, target_z):
+    min_z, found = min_named_geoms_z(model, data, foot_geom_names)
+    if min_z is None:
+        return None, []
+    data.qpos[2] += float(target_z) - min_z
+    mujoco.mj_forward(model, data)
+    adjusted_min_z, adjusted_found = min_named_geoms_z(model, data, foot_geom_names)
+    return adjusted_min_z, adjusted_found
 
 
 def spawn_robot(model, data, joint_pos, cfg):
-    """Place robot at reset pose. foot_contact avoids the ~0.35 m air gap at isaac z=0.8."""
+    """Place robot at reset pose, optionally aligning contact geoms with the ground."""
     spawn_mode = cfg.get("spawn_mode", "isaac")
     if cfg.get("auto_ground_base", False):
         spawn_mode = "foot_contact"
@@ -70,32 +155,49 @@ def spawn_robot(model, data, joint_pos, cfg):
     data.qpos[:] = 0
     data.qvel[:] = 0
     data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
-    data.qpos[7:] = joint_pos
+    if "base_euler_rpy" in cfg:
+        data.qpos[3:7] = euler_rpy_to_quat_wxyz(*np.asarray(cfg["base_euler_rpy"], dtype=np.float64))
+    spawn_joint_pos = joint_pos.copy()
+    data.qpos[7:] = spawn_joint_pos
 
     foot_ids = get_foot_body_ids(model)
+    foot_geom_names = cfg.get("foot_contact_geom_names", DEFAULT_FOOT_CONTACT_GEOM_NAMES)
+    foot_contact_z = float(cfg.get("foot_contact_z", cfg.get("foot_clearance", 0.0)))
+    used_foot_geoms = []
+    sole_min_z = None
     if spawn_mode == "foot_contact":
-        target_foot = float(cfg.get("foot_contact_z", cfg.get("foot_clearance", 0.0)))
-        lo, hi = 0.4, 0.95
-        for _ in range(50):
-            mid = (lo + hi) / 2
-            data.qpos[2] = mid
-            mujoco.mj_forward(model, data)
-            if min_foot_height(model, data, foot_ids) > target_foot:
-                hi = mid
-            else:
-                lo = mid
-        data.qpos[2] = lo
+        if "base_pos" in cfg:
+            data.qpos[:3] = np.array(cfg["base_pos"], dtype=np.float64)
+        mujoco.mj_forward(model, data)
+        sole_min_z, used_foot_geoms = adjust_base_height_to_foot_contact(
+            model, data, foot_geom_names, foot_contact_z
+        )
+        if sole_min_z is None:
+            print(
+                "[WARN] foot_contact geom(s) not found; falling back to foot body origin height. "
+                "This is imprecise because the body origin is not the sole/contact surface."
+            )
+            body_min_z = min_foot_height(model, data, foot_ids)
+            if math.isfinite(body_min_z):
+                data.qpos[2] += foot_contact_z - body_min_z
+                mujoco.mj_forward(model, data)
+                sole_min_z = min_foot_height(model, data, foot_ids)
     elif "base_pos" in cfg:
         data.qpos[:3] = np.array(cfg["base_pos"], dtype=np.float64)
 
     mujoco.mj_forward(model, data)
-    if spawn_mode == "foot_contact":
-        trunk_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "Trunk")
-        print(
-            "[WARN] spawn_mode=foot_contact lowers trunk to ~0.45 m; policy expects ~0.8 m "
-            "and gait often looks like hopping. Prefer spawn_mode: isaac for locomotion."
-        )
-    return spawn_mode, foot_ids
+    sole_min_z, used_foot_geoms = min_named_geoms_z(model, data, foot_geom_names)
+    if sole_min_z is None:
+        sole_min_z = min_foot_height(model, data, foot_ids)
+    return (
+        spawn_mode,
+        foot_ids,
+        used_foot_geoms,
+        sole_min_z,
+        foot_contact_z,
+        data.qpos[3:7].copy(),
+        spawn_joint_pos,
+    )
 
 
 def apply_ground_friction(model, friction, contact_soft=True):
@@ -113,6 +215,63 @@ def apply_ground_friction(model, friction, contact_soft=True):
                 model.geom_solimp[i] = np.array([0.9, 0.95, 0.001, 0.5, 2.0], dtype=np.float64)
                 model.geom_solref[i] = np.array([0.05, 1.0], dtype=np.float64)
             break
+
+
+def configure_mujoco_options(model, cfg):
+    integrator_name = str(cfg.get("mujoco_integrator", "euler")).lower()
+    integrator_map = {
+        "euler": mujoco.mjtIntegrator.mjINT_EULER,
+        "implicit": mujoco.mjtIntegrator.mjINT_IMPLICIT,
+        "implicitfast": mujoco.mjtIntegrator.mjINT_IMPLICITFAST,
+    }
+    if integrator_name not in integrator_map:
+        raise ValueError(
+            f"Unsupported mujoco_integrator={integrator_name}. "
+            f"Expected one of {sorted(integrator_map.keys())}."
+        )
+    model.opt.integrator = integrator_map[integrator_name]
+    return integrator_name
+
+
+def apply_mujoco_dof_tuning(model, cfg):
+    armature_scale = float(cfg.get("dof_armature_scale", 1.0))
+    damping_offset = float(cfg.get("dof_damping_offset", 0.0))
+    if armature_scale != 1.0:
+        model.dof_armature[6:] *= armature_scale
+    if damping_offset != 0.0:
+        model.dof_damping[6:] += damping_offset
+    return armature_scale, damping_offset
+
+
+def contact_pair_name(model, geom_id):
+    geom_name = model.geom(geom_id).name
+    if geom_name:
+        return geom_name
+    body_id = model.geom_bodyid[geom_id]
+    body_name = model.body(body_id).name
+    return f"geom#{geom_id}@{body_name}"
+
+
+def summarize_contacts(model, data, max_items=6):
+    contacts = []
+    for i in range(data.ncon):
+        contact = data.contact[i]
+        pair = (
+            contact_pair_name(model, contact.geom1),
+            contact_pair_name(model, contact.geom2),
+        )
+        contacts.append(pair)
+    unique_pairs = []
+    seen = set()
+    for pair in contacts:
+        key = tuple(sorted(pair))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_pairs.append(pair)
+        if len(unique_pairs) >= max_items:
+            break
+    return unique_pairs
 
 
 def setup_viewer_camera(viewer, model, cam_cfg):
@@ -143,8 +302,14 @@ def load_config(config_name):
     path = config_name if os.path.isabs(config_name) else os.path.join(CONFIG_DIR, config_name)
     with open(path, "r") as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
-    cfg["policy_path"] = cfg["policy_path"].replace("{LEGGED_GYM_ROOT_DIR}", LEGGED_GYM_ROOT_DIR)
-    cfg["xml_path"] = cfg["xml_path"].replace("{LEGGED_GYM_ROOT_DIR}", LEGGED_GYM_ROOT_DIR)
+    for key in (
+        "policy_path",
+        "xml_path",
+        "reference_init_dataset_dir",
+        "reference_init_joint_mapping",
+    ):
+        if key in cfg and isinstance(cfg[key], str):
+            cfg[key] = cfg[key].replace("{LEGGED_GYM_ROOT_DIR}", LEGGED_GYM_ROOT_DIR)
     return cfg
 
 
@@ -250,6 +415,89 @@ def build_loco_amp_one_step_obs(
     return np.concatenate((cmd_obs, omega, gravity, qj, dqj, action)).astype(np.float32)
 
 
+def infer_loco_command_name(command):
+    vx, vy, wz = [float(value) for value in command]
+    if max(abs(vx), abs(vy), abs(wz)) < 0.05:
+        return "standing"
+    if vx > 0.05 and abs(vy) > 0.05:
+        return "diagonal_left" if vy > 0.0 else "diagonal_right"
+    if abs(vx) >= abs(vy):
+        return "forward" if vx >= 0.0 else "backward"
+    return "leftstep" if vy >= 0.0 else "rightstep"
+
+
+def resolve_loco_reference_motion_name(cfg, command):
+    if cfg.get("reference_init_motion_name"):
+        return str(cfg["reference_init_motion_name"])
+    inferred = infer_loco_command_name(command)
+    motion_map = cfg.get(
+        "reference_init_motion_map",
+        {
+            "standing": "standing",
+            "forward": "forward",
+            "backward": "backward",
+            "leftstep": "leftstep",
+            "rightstep": "rightstep",
+            "diagonal_left": "diagonal",
+            "diagonal_right": "diagonal",
+        },
+    )
+    return motion_map.get(inferred, inferred)
+
+
+def maybe_load_reference_init_state(cfg, command):
+    if not cfg.get("reference_init_enabled", False):
+        return None
+
+    dataset_dir = cfg.get("reference_init_dataset_dir")
+    joint_mapping_path = cfg.get("reference_init_joint_mapping")
+    if not dataset_dir or not joint_mapping_path:
+        raise FileNotFoundError(
+            "reference_init_enabled=true requires reference_init_dataset_dir and "
+            "reference_init_joint_mapping in the config."
+        )
+
+    motion_name = resolve_loco_reference_motion_name(cfg, command)
+    motion_path = os.path.join(dataset_dir, f"{motion_name}.pt")
+    if not os.path.isfile(motion_path):
+        raise FileNotFoundError(f"Reference init motion not found: {motion_path}")
+
+    payload = torch.load(motion_path, map_location="cpu")
+    trajectories = payload if isinstance(payload, list) else [payload]
+    trajectories = [traj for traj in trajectories if isinstance(traj, dict)]
+    if not trajectories:
+        raise RuntimeError(f"Reference init motion has no valid trajectories: {motion_path}")
+
+    trajectory_index = int(cfg.get("reference_init_trajectory_index", 0))
+    trajectory = trajectories[min(max(trajectory_index, 0), len(trajectories) - 1)]
+    frame_index = int(cfg.get("reference_init_frame_index", 0))
+
+    with open(joint_mapping_path, "r") as handle:
+        mapping = {}
+        for line in handle:
+            index_str, joint_name = line.strip().split(" ", 1)
+            mapping[joint_name] = int(index_str)
+
+    lower_body_joint_names = cfg.get("reference_init_leg_joint_names", DEFAULT_LOCO_LEG_JOINT_NAMES)
+    joint_position = trajectory["joint_position"]
+    joint_velocity = trajectory["joint_velocity"]
+    max_frame = joint_position.shape[0] - 1
+    frame_index = min(max(frame_index, 0), max_frame)
+    q_leg = np.array(
+        [joint_position[frame_index, mapping[name]].item() for name in lower_body_joint_names],
+        dtype=np.float32,
+    )
+    dq_leg = np.array(
+        [joint_velocity[frame_index, mapping[name]].item() for name in lower_body_joint_names],
+        dtype=np.float32,
+    )
+    print(
+        "[INFO] reference init loaded: "
+        f"motion={motion_name}, trajectory_index={trajectory_index}, frame_index={frame_index}"
+    )
+    return {"q_leg": q_leg, "dq_leg": dq_leg, "motion_name": motion_name}
+
+
 def build_foundation_one_step_obs(
     d,
     default_angles,
@@ -313,6 +561,70 @@ def build_foundation_one_step_obs(
             phase_onehot,
         )
     ).astype(np.float32)
+
+
+def build_current_one_step_obs(
+    cfg,
+    d,
+    trunk_id,
+    default_angles,
+    action,
+    command,
+    command_scale,
+    target_world,
+    target_use_z,
+    fsm,
+    leg_indices,
+    lin_vel_scale,
+    ang_vel_scale,
+    dof_pos_scale,
+    dof_vel_scale,
+    goal_z_scale,
+):
+    if is_foundation_task(cfg):
+        obs_action = mask_upper_body_action(action, leg_indices)
+        return build_foundation_one_step_obs(
+            d,
+            default_angles,
+            obs_action,
+            lin_vel_scale,
+            ang_vel_scale,
+            dof_pos_scale,
+            dof_vel_scale,
+            goal_z_scale,
+            fsm.cmd_vx,
+            fsm.cmd_vy,
+            fsm.goal_z,
+            fsm.standing_goal_z,
+            fsm.time_left_norm(),
+            fsm.progress_phase,
+            fsm.gait_phase(),
+            fsm.phase,
+        )
+
+    if is_loco_amp_task(cfg):
+        return build_loco_amp_one_step_obs(
+            d,
+            default_angles,
+            action,
+            command,
+            command_scale,
+            ang_vel_scale,
+            dof_pos_scale,
+            dof_vel_scale,
+        )
+
+    return build_one_step_obs(
+        d,
+        trunk_id,
+        default_angles,
+        target_world,
+        target_use_z,
+        ang_vel_scale,
+        dof_pos_scale,
+        dof_vel_scale,
+        action,
+    )
 
 
 class FoundationEpisodeFSM:
@@ -447,20 +759,56 @@ def push_obs_history(obs, one_step_obs, num_one_step_obs, num_actor_history, num
     return obs
 
 
+def initialize_obs_history(one_step_obs, num_one_step_obs, num_actor_history, num_obs):
+    one_step_dim = len(one_step_obs) if num_one_step_obs is None else int(num_one_step_obs)
+    history_len = int(num_actor_history)
+    if one_step_dim * history_len != num_obs:
+        inferred = num_obs // one_step_dim
+        assert one_step_dim * inferred == num_obs, (
+            f"Cannot infer history length from one_step_obs={one_step_dim}, num_obs={num_obs}"
+        )
+        history_len = inferred
+    obs = np.tile(one_step_obs.astype(np.float32), history_len)
+    assert obs.shape[0] == num_obs, f"obs history has {obs.shape[0]} dims, expected {num_obs}"
+    print(
+        "[INFO] obs history initialized from current frame: "
+        f"one_step_obs_dim={one_step_dim}, history_len={history_len}, full_obs_dim={num_obs}"
+    )
+    return obs.astype(np.float32)
+
+
 def resolve_policy_path(cfg, override):
-    if override:
+    if override and os.path.isfile(override):
         return override
+    if override:
+        raise FileNotFoundError(f"Explicit policy_path does not exist: {override}")
+
     path = cfg.get("policy_path")
     if path and os.path.isfile(path):
         return path
+    if path and not cfg.get("allow_policy_autodetect", False):
+        raise FileNotFoundError(
+            f"Configured policy_path does not exist: {path}. "
+            "Set allow_policy_autodetect=true only if you intentionally want the latest exported policy."
+        )
+
+    if not cfg.get("allow_policy_autodetect", False):
+        raise FileNotFoundError(
+            "Policy not found. Set policy_path in yaml or pass --policy_path."
+        )
+
+    import glob
+
     candidates = glob.glob(
         os.path.join(LEGGED_GYM_ROOT_DIR, "logs", "**", "exported", "*.pt"),
         recursive=True,
     )
     if candidates:
-        return max(candidates, key=os.path.getmtime)
+        detected = max(candidates, key=os.path.getmtime)
+        print(f"[WARN] allow_policy_autodetect=true; using latest exported policy: {detected}")
+        return detected
     raise FileNotFoundError(
-        "Policy not found. Set policy_path in yaml or pass --policy_path."
+        "Policy autodetect enabled, but no exported *.pt was found under logs/**/exported/."
     )
 
 
@@ -534,6 +882,8 @@ def main():
     kps = np.array(cfg["kps"], dtype=np.float32) * kp_gain_scale
     kds = np.array(cfg["kds"], dtype=np.float32) * kd_gain_scale
     warmup_steps = int(cfg.get("warmup_steps", 0))
+    policy_blend_steps = int(cfg.get("policy_blend_steps", 0))
+    command_ramp_steps = int(cfg.get("command_ramp_steps", 0))
     action_smooth = (
         args.smooth_factor
         if args.smooth_factor is not None
@@ -574,7 +924,7 @@ def main():
     print(f"[INFO] Config: {args.config}")
     print(f"[INFO] Task: {'goalkeeper_foundation' if foundation else 'k1_loco_amp' if loco_amp else 'move_amp'}")
     print(f"[INFO] Model: {xml_path}")
-    print(f"[INFO] Policy: {policy_path}")
+    print(f"[INFO] loaded policy_path={policy_path}")
     print(f"[INFO] Obs: {num_one_step_obs} x {num_actor_history} = {num_obs}")
     if foundation:
         print(f"[INFO] Leg-only control indices: {leg_indices.tolist()}")
@@ -586,7 +936,8 @@ def main():
         print(f"[INFO] Target (world): {target_world}, use_z={target_use_z}")
     print(
         f"[INFO] PD kp_scale={kp_gain_scale}, kd_scale={kd_gain_scale}, "
-        f"action_smooth={action_smooth}, target_smooth={target_smooth}, warmup={warmup_steps}"
+        f"action_smooth={action_smooth}, target_smooth={target_smooth}, warmup={warmup_steps}, "
+        f"policy_blend_steps={policy_blend_steps}, command_ramp_steps={command_ramp_steps}"
     )
 
     policy = torch.jit.load(policy_path, map_location="cpu")
@@ -596,8 +947,15 @@ def main():
     m.opt.timestep = sim_dt
     if "mujoco_iterations" in cfg:
         m.opt.iterations = int(cfg["mujoco_iterations"])
+    integrator_name = configure_mujoco_options(m, cfg)
+    dof_armature_scale, dof_damping_offset = apply_mujoco_dof_tuning(m, cfg)
     apply_ground_friction(
         m, cfg.get("ground_friction"), contact_soft=cfg.get("soft_ground_contact", False)
+    )
+    print(
+        "[INFO] MuJoCo runtime: "
+        f"dt={m.opt.timestep:.4f}, iterations={m.opt.iterations}, integrator={integrator_name}, "
+        f"dof_armature_scale={dof_armature_scale}, dof_damping_offset={dof_damping_offset}"
     )
 
     trunk_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "Trunk")
@@ -611,12 +969,35 @@ def main():
         if "init_joint_pos" in cfg
         else default_angles.astype(np.float64)
     )
-    spawn_mode, foot_ids = spawn_robot(m, d, spawn_joints, cfg)
+    reference_init_state = None
+    if loco_amp:
+        reference_init_state = maybe_load_reference_init_state(cfg, loco_command)
+        if reference_init_state is not None:
+            spawn_joints = spawn_joints.copy()
+            spawn_joints[leg_indices] = reference_init_state["q_leg"].astype(np.float64)
+
+    (
+        spawn_mode,
+        foot_ids,
+        used_foot_geoms,
+        sole_min_z,
+        foot_contact_z,
+        base_quat_wxyz,
+        effective_spawn_joints,
+    ) = spawn_robot(
+        m, d, spawn_joints, cfg
+    )
+    if reference_init_state is not None:
+        d.qvel[6 + leg_indices] = reference_init_state["dq_leg"].astype(np.float64)
+        mujoco.mj_forward(m, d)
     foot_z = min_foot_height(m, d, foot_ids)
     standing_goal_z = float(d.xpos[trunk_id, 2])
+    used_geom_names = [item[0] for item in used_foot_geoms]
     print(
-        f"[INFO] spawn_mode={spawn_mode}: trunk z={standing_goal_z:.3f}, "
-        f"foot z={foot_z:.3f} (isaac play uses z=0.8 with feet on ground in PhysX)"
+        f"[INFO] spawn_mode={spawn_mode}: trunk/base z={standing_goal_z:.3f}, "
+        f"sole/contact min z={sole_min_z:.4f}, foot body origin z={foot_z:.4f}, "
+        f"foot_contact_z={foot_contact_z:.4f}, foot_contact_geoms={used_geom_names}, "
+        f"base_quat_wxyz={np.round(base_quat_wxyz, 4).tolist()}"
     )
 
     fsm = FoundationEpisodeFSM(cfg, control_dt) if foundation else None
@@ -628,14 +1009,22 @@ def main():
             fsm.begin_execute(vx, vy, goal_z, t_exec)
 
     action = np.zeros(num_actions, dtype=np.float32)
-    obs_action = np.zeros(num_actions, dtype=np.float32)
     smoothed_action = np.zeros(num_actions, dtype=np.float32)
-    target_dof_pos = default_angles.copy()
-    filtered_target_dof_pos = default_angles.copy()
-    obs = np.zeros(num_obs, dtype=np.float32)
+    warmup_target_dof_pos = effective_spawn_joints.astype(np.float32)
+    target_dof_pos = warmup_target_dof_pos.copy() if warmup_steps > 0 else default_angles.copy()
+    filtered_target_dof_pos = target_dof_pos.copy()
+    startup_target_anchor = target_dof_pos.copy()
+    obs = None
 
     counter = 0
     use_policy = warmup_steps == 0
+    obs_history_initialized = False
+    policy_update_counter = 0
+    printed_policy_diagnostic = False
+    printed_fall_diagnostic = False
+    status_print_interval = float(cfg.get("status_print_interval_s", 0.0))
+    next_status_print_time = status_print_interval
+    fall_diag_height = float(cfg.get("fall_diag_height", 0.22))
 
     stdin_prompt = (
         "Set command (vx vy goal_z T_execute; goal_z<0 = standing height): "
@@ -688,56 +1077,48 @@ def main():
                     print(f"Invalid input.\n{stdin_prompt}", end="", flush=True)
 
             if use_policy and counter % decimation == 0:
-                if foundation:
-                    obs_action = mask_upper_body_action(action, leg_indices)
-                    one_step_obs = build_foundation_one_step_obs(
-                        d,
-                        default_angles,
-                        obs_action,
-                        lin_vel_scale,
-                        ang_vel_scale,
-                        dof_pos_scale,
-                        dof_vel_scale,
-                        goal_z_scale,
-                        fsm.cmd_vx,
-                        fsm.cmd_vy,
-                        fsm.goal_z,
-                        fsm.standing_goal_z,
-                        fsm.time_left_norm(),
-                        fsm.progress_phase,
-                        fsm.gait_phase(),
-                        fsm.phase,
-                    )
-                elif loco_amp:
-                    one_step_obs = build_loco_amp_one_step_obs(
-                        d,
-                        default_angles,
-                        action,
-                        loco_command,
-                        command_scale,
-                        ang_vel_scale,
-                        dof_pos_scale,
-                        dof_vel_scale,
-                    )
-                else:
-                    one_step_obs = build_one_step_obs(
-                        d,
-                        trunk_id,
-                        default_angles,
-                        target_world,
-                        target_use_z,
-                        ang_vel_scale,
-                        dof_pos_scale,
-                        dof_vel_scale,
-                        action,
-                    )
-
-                obs = push_obs_history(
-                    obs, one_step_obs, num_one_step_obs, num_actor_history, num_obs
+                command_alpha = 1.0
+                if loco_amp and command_ramp_steps > 0:
+                    command_alpha = min(1.0, policy_update_counter / float(command_ramp_steps))
+                effective_loco_command = loco_command * command_alpha
+                one_step_obs = build_current_one_step_obs(
+                    cfg,
+                    d,
+                    trunk_id,
+                    default_angles,
+                    action,
+                    effective_loco_command,
+                    command_scale,
+                    target_world,
+                    target_use_z,
+                    fsm,
+                    leg_indices,
+                    lin_vel_scale,
+                    ang_vel_scale,
+                    dof_pos_scale,
+                    dof_vel_scale,
+                    goal_z_scale,
                 )
+
+                if not obs_history_initialized:
+                    obs = initialize_obs_history(
+                        one_step_obs, num_one_step_obs, num_actor_history, num_obs
+                    )
+                    obs_history_initialized = True
+                else:
+                    obs = push_obs_history(
+                        obs, one_step_obs, num_one_step_obs, num_actor_history, num_obs
+                    )
 
                 raw_action = policy(torch.from_numpy(obs).unsqueeze(0)).detach().numpy().squeeze()
                 raw_action = np.clip(raw_action, -100.0, 100.0)
+                if not printed_policy_diagnostic:
+                    print(
+                        "[INFO] first policy action diagnostic: "
+                        f"raw_action_min={raw_action.min():.3f}, raw_action_max={raw_action.max():.3f}, "
+                        f"command_alpha={command_alpha:.3f}"
+                    )
+                    printed_policy_diagnostic = True
                 smoothed_action = (
                     smoothed_action * action_smooth + raw_action * (1.0 - action_smooth)
                 )
@@ -752,11 +1133,19 @@ def main():
                     )
                 else:
                     desired_target = action * action_scale + default_angles
+                policy_alpha = 1.0
+                if policy_blend_steps > 0:
+                    policy_alpha = min(1.0, (policy_update_counter + 1) / float(policy_blend_steps))
+                    desired_target = (
+                        startup_target_anchor * (1.0 - policy_alpha)
+                        + desired_target * policy_alpha
+                    )
                 filtered_target_dof_pos = (
                     filtered_target_dof_pos * target_smooth
                     + desired_target * (1.0 - target_smooth)
                 )
                 target_dof_pos = filtered_target_dof_pos
+                policy_update_counter += 1
 
             for _ in range(decimation):
                 tau = compute_torques(target_dof_pos, d.qpos[7:], d.qvel[6:], kps, kds)
@@ -772,6 +1161,28 @@ def main():
                     lin_vel, ang_vel, gravity, foot_ids, d, foot_ground_z
                 )
                 fsm.update(stable)
+
+            sim_time = counter * m.opt.timestep
+            if not printed_fall_diagnostic and float(d.xpos[trunk_id, 2]) < fall_diag_height:
+                printed_fall_diagnostic = True
+                contact_pairs = summarize_contacts(m, d)
+                print(
+                    "[WARN] fall diagnostic: "
+                    f"t={sim_time:.2f}s, trunk_z={d.xpos[trunk_id, 2]:.3f}, "
+                    f"qvel_norm={np.linalg.norm(d.qvel):.3f}, contacts={contact_pairs}"
+                )
+            if status_print_interval > 0.0 and sim_time >= next_status_print_time:
+                trunk_pos = d.xpos[trunk_id]
+                body_lin_vel = quat_rotate_inverse_xyzw(
+                    mujoco_quat_to_xyzw(d.qpos[3:7]), d.qvel[0:3].astype(np.float32)
+                )
+                print(
+                    "[INFO] sim_status: "
+                    f"t={sim_time:.2f}s, trunk_xyz={np.round(trunk_pos, 3).tolist()}, "
+                    f"body_v={np.round(body_lin_vel, 3).tolist()}, "
+                    f"cmd={np.round(loco_command, 3).tolist() if loco_amp else 'n/a'}"
+                )
+                next_status_print_time += status_print_interval
 
             viewer.sync()
             time_until_next = decimation * m.opt.timestep - (time.time() - loop_start)
