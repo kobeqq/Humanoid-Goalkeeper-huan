@@ -14,7 +14,7 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         num_one_step_observations = num_command_obs + 3 + 3 + K122Cfg.env.num_dofs * 2 + num_actions
         num_privileged_obs = num_one_step_observations + 3
         num_observations = K122Cfg.env.num_actor_history * num_one_step_observations
-        episode_length_s = 6
+        episode_length_s = 10
         use_ball_actor = False
         play = False
 
