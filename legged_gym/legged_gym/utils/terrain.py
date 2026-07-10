@@ -35,8 +35,14 @@ import random
 from isaacgym import terrain_utils
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 from scipy import ndimage
-from pydelatin import Delatin
-import pyfqmr
+try:
+    from pydelatin import Delatin
+except ModuleNotFoundError:
+    Delatin = None
+try:
+    import pyfqmr
+except ModuleNotFoundError:
+    pyfqmr = None
 from scipy.ndimage import binary_dilation
 
 
@@ -92,6 +98,11 @@ class Terrain:
                 structure = np.ones((half_edge_width*2+1, 1))
                 self.x_edge_mask = binary_dilation(self.x_edge_mask, structure=structure)
                 if self.cfg.simplify_grid:
+                    if pyfqmr is None:
+                        raise ModuleNotFoundError(
+                            "pyfqmr is required for terrain mesh simplification, "
+                            "but not for plane terrain."
+                        )
                     mesh_simplifier = pyfqmr.Simplify()
                     mesh_simplifier.setMesh(self.vertices, self.triangles)
                     mesh_simplifier.simplify_mesh(target_count = int(0.05*self.triangles.shape[0]), aggressiveness=7, preserve_border=True, verbose=10)
@@ -1044,6 +1055,11 @@ def stepping_stones_terrain(terrain, stone_size, stone_distance, max_height, pla
     return terrain
 
 def convert_heightfield_to_trimesh_delatin(height_field_raw, horizontal_scale, vertical_scale, max_error=0.01):
+    if Delatin is None:
+        raise ModuleNotFoundError(
+            "pydelatin is required for heightfield-to-trimesh conversion, "
+            "but not for plane terrain."
+        )
     mesh = Delatin(np.flip(height_field_raw, axis=1).T, z_scale=vertical_scale, max_error=max_error)
     vertices = np.zeros_like(mesh.vertices)
     vertices[:, :2] = mesh.vertices[:, :2] * horizontal_scale

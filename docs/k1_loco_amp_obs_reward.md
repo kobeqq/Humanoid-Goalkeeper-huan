@@ -19,17 +19,17 @@
 - `legged_robot_k1_loco_amp.py::_build_actor_one_step_obs`
 - `k1_loco_amp_config.py::env.num_one_step_observations`
 
-单步维度一共是 `65` 维:
+单步维度一共是 `67` 维:
 
 | 模块 | 维度 | 内容 |
 | --- | ---: | --- |
-| 命令观测 | 3 | `commands * command_scale`，即 `vx_cmd, vy_cmd, wz_cmd` |
+| 命令观测 | 5 | `vx_cmd, vy_cmd, wz_cmd` 加 gait clock 的 `sin/cos`；clock 只作为观测，不再产生 gait phase reward |
 | 基座角速度 | 3 | `base_ang_vel` |
 | 重力投影 | 3 | `projected_gravity` |
 | 关节位置 | 22 | `(dof_pos - default_dof_pos)` |
 | 关节速度 | 22 | `dof_vel` |
 | 上一时刻动作 | 12 | `actions`，这里只保留下肢 12 维动作 |
-| 总计 | 65 | `3 + 3 + 3 + 22 + 22 + 12` |
+| 总计 | 67 | `5 + 3 + 3 + 22 + 22 + 12` |
 
 这里有两个要点:
 
@@ -39,9 +39,9 @@
 最终 actor 输入不是单步 `65` 维，而是 history 堆叠后的:
 
 - `num_actor_history = 10`
-- `num_observations = 10 x 65 = 650`
+- `num_observations = 10 x 67 = 670`
 
-也就是说，策略实际输入是最近 `10` 步普通观测拼接后的 `650` 维向量。
+也就是说，策略实际输入是最近 `10` 步普通观测拼接后的 `670` 维向量。
 
 ### 1.2 特权观测
 
@@ -56,11 +56,11 @@
 
 | 模块 | 维度 |
 | --- | ---: |
-| 普通观测 actor obs | 65 |
+| 普通观测 actor obs | 67 |
 | 基座线速度 `base_lin_vel` | 3 |
-| 总计 | 68 |
+| 总计 | 70 |
 
-所以 critic 使用的特权观测是 `68` 维。
+所以 critic 使用的特权观测是 `70` 维。
 
 ### 1.3 AMP 观测
 
@@ -72,24 +72,27 @@ AMP 观测不属于 actor/critic 普通输入，它是单独提供给判别器�
 - `g1_utils.py::build_lower_body_amp_step_obs`
 - `k1_loco_amp_config.py::amp`
 
-单步 AMP 观测是 `32` 维:
+单步 AMP 观测是 `46` 维:
 
 | 模块 | 维度 | 内容 |
 | --- | ---: | --- |
 | 下肢关节位置 | 12 | `q_leg` |
 | 下肢关节速度 | 12 | `dq_leg` |
-| 基座线速度 XY | 2 | `base_lin_vel[:, :2]` |
+| 基座线速度 XYZ | 3 | 包含 `base_vz`，让判别器可识别 hopping |
 | 基座角速度 | 3 | `base_ang_vel` |
 | 重力投影 | 3 | `projected_gravity` |
-| 总计 | 32 | `12 + 12 + 2 + 3 + 3` |
+| 基座高度 | 1 | `torso_pos[:, 2]`；expert 使用 motion base height |
+| 左右脚相对基座位置 | 6 | `left/right foot relative position`，连续值比离散接触标签更稳健 |
+| 左右脚相对基座速度 | 6 | `left/right foot relative velocity`，帮助判别器识别同步起跳 |
+| 总计 | 46 | `12 + 12 + 3 + 3 + 3 + 1 + 6 + 6` |
 
 配置中:
 
 - `num_steps = 2`
-- `num_obs_per_step = 32`
-- `num_obs = 64`
+- `num_obs_per_step = 46`
+- `num_obs = 92`
 
-训练时 runner 会把连续两步 AMP 状态拼起来送给判别器，所以判别器最终输入是 `64` 维。
+训练时 runner 会把连续两步 AMP 状态拼起来送给判别器，所以判别器最终输入是 `92` 维。
 
 ## 2. 奖励
 
@@ -111,7 +114,6 @@ AMP 观测不属于 actor/critic 普通输入，它是单独提供给判别器�
 | --- | --- |
 | `tracking_lin_vel` | `exp(-sum((commands_xy - base_lin_vel_xy)^2) / tracking_sigma)` |
 | `tracking_ang_vel` | `exp(-((commands_wz - base_ang_vel_z)^2) / yaw_rate_sigma)` |
-| `yaw_stability` | `exp(-(yaw_error^2) / yaw_sigma)` |
 | `stand_still` | `1[||commands_xy|| < 0.05] * exp(-sum(dof_vel_lower_body^2) * stand_still_sigma)` |
 | `upright` | `exp(-3 * sum(projected_gravity_xy^2))` |
 | `height` | `exp(-((torso_z - target_base_z)^2) / height_sigma)` |
@@ -136,20 +138,21 @@ AMP 奖励来自判别器，不在环境的 `_reward_*` 函数里定义。
 
 - `enable_discriminator = True`
 - `reward_mode = "additive"`
-- `amp_scale = 2.0`
-- `amp_coef = 0.45`
+- `amp_scale = 0.5`（初始值）
+- `amp_coef = 0.40`
+- `amp_target_fraction = 0.40`
 - `adaptive_amp_scale = True`
 
 | 奖励名称 | 公式 |
 | --- | --- |
 | `amp_reward` | `0.5 * discriminator_predict_reward(amp_state_two_steps)` |
-| `total_reward` | `raw_rewards + amp_scale * amp_reward` |
+| `total_reward` | `raw_task_and_regularization + adaptive_amp_scale * amp_reward` |
 
 补充说明:
 
 - `raw_rewards` 是环境里算出来的任务奖励和正则化奖励之和
 - `amp_scale` 会在 `adaptive_amp_scale=True` 时动态调整
-- `amp_coef = 0.45` 会传给 AMP 模块本身，但当前 `reward_mode="additive"` 时最终混合公式用的是 `amp_scale`
+- `amp_coef = 0.40` 会传给 AMP 模块本身，但当前 `reward_mode="additive"` 时最终混合公式用的是 `amp_scale`
 
 ---
 
@@ -160,6 +163,11 @@ AMP 奖励来自判别器，不在环境的 `_reward_*` 函数里定义。
 | 奖励名称 | 公式 |
 | --- | --- |
 | `feet_slip` | `sum((||foot_vel_xy||^2) * 1[foot_contact])` |
+| `feet_air_time` | 单脚 touchdown 时奖励接近目标区间的 swing duration；stand 时关闭 |
+| `bilateral_flight` | 移动时仅在双脚离地持续超过 `flight_grace_s=0.05s` 后开始惩罚 |
+| `base_vz` | `base_lin_vel_z^2` |
+| `vertical_acc` | `base_vertical_acceleration^2` |
+| `soft_heading` | 只惩罚超出 15° dead zone 的 heading error，不 termination |
 | `ang_vel_xy` | `sum(base_ang_vel_xy^2)` |
 | `dof_acc` | `sum(((last_dof_vel - dof_vel) / dt)^2)` |
 | `smoothness` | `sum((actions - 2 * last_actions + last_last_actions)^2)` |
@@ -175,19 +183,19 @@ AMP 奖励来自判别器，不在环境的 `_reward_*` 函数里定义。
 
 | 类别 | 维度 | 内容 |
 | --- | ---: | --- |
-| 普通观测 | 65 | 命令 + 角速度 + 重力投影 + 22 维关节位置 + 22 维关节速度 + 12 维动作 |
-| 普通观测历史堆叠 | 650 | `10 x 65` |
-| 特权观测 | 68 | 普通观测 + `base_lin_vel(3)` |
-| AMP 单步观测 | 32 | 下肢状态 + 基座速度/角速度 + 重力投影 |
-| AMP 判别器输入 | 64 | 连续两步 AMP 观测拼接 |
+| 普通观测 | 67 | 命令/clock + 角速度 + 重力投影 + 22 维关节位置 + 22 维关节速度 + 12 维动作 |
+| 普通观测历史堆叠 | 670 | `10 x 67` |
+| 特权观测 | 70 | 普通观测 + `base_lin_vel(3)` |
+| AMP 单步观测 | 46 | 下肢状态 + base xyz 速度/角速度 + 重力投影 + base height + 双脚相对位置/速度 |
+| AMP 判别器输入 | 92 | 连续两步 AMP 观测拼接 |
 
 ### 3.2 奖励分类
 
 | 类别 | 奖励项 |
 | --- | --- |
-| 任务奖励 | `tracking_lin_vel`, `tracking_ang_vel`, `yaw_stability`, `stand_still`, `upright`, `height` |
+| 任务奖励 | `tracking_lin_vel`, `tracking_ang_vel`, `stand_still` |
 | AMP 奖励 | 判别器输出的 `amp_reward` |
-| 正则化奖励 | `feet_slip`, `ang_vel_xy`, `dof_acc`, `smoothness`, `torques`, `dof_vel`, `dof_pos_limits`, `dof_vel_limits`, `torque_limits` |
+| 正则化奖励 | `upright`, `height`, `feet_slip`, `feet_air_time`, `bilateral_flight`, `base_vz`, `vertical_acc`, `soft_heading`, `ang_vel_xy`, `dof_acc`, `smoothness`, `torques`, `dof_vel`, limits |
 
 ## 4. 一句话理解
 

@@ -458,7 +458,7 @@ def resolve_loco_reference_motion_name(cfg, command):
             "leftstep": "leftstep",
             "rightstep": "rightstep",
             "diagonal_left": "diagonal",
-            "diagonal_right": "diagonal",
+            "diagonal_right": "diagonal_right",
         },
     )
     return motion_map.get(inferred, inferred)

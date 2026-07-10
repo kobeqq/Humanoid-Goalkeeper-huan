@@ -278,12 +278,21 @@ class HIMPPO:
 
                                         
                     # amp_expert_obs_batch = self.amp_normalizer.normalize_torch(amp_expert_obs_batch_mask, self.device)
-                    amp_expert_obs_batch = self.motion_buffer.get_expert_obs(
+                    raw_amp_obs_batch = amp_obs_batch
+                    raw_amp_expert_obs_batch = self.motion_buffer.get_expert_obs(
                         batch_size=amp_obs_batch.shape[0],
                         motion_ids=amp_motion_id_batch,
                     ).to(self.device)
-                    amp_expert_obs_batch = self.amp_normalizer.normalize_torch(amp_expert_obs_batch, self.device)
-                    amp_obs_batch = self.amp_normalizer.normalize_torch(amp_obs_batch, self.device)
+                    # Running statistics must describe the raw policy/expert
+                    # distribution.  Updating them with already-normalized
+                    # samples makes the statistics collapse toward N(0, 1)
+                    # and changes the discriminator's input scale over time.
+                    amp_expert_obs_batch = self.amp_normalizer.normalize_torch(
+                        raw_amp_expert_obs_batch, self.device
+                    )
+                    amp_obs_batch = self.amp_normalizer.normalize_torch(
+                        raw_amp_obs_batch, self.device
+                    )
             
                     amp_loss, expert_loss, policy_loss = 0.0, 0.0, 0.0
                     assert amp_obs_batch.shape == amp_expert_obs_batch.shape
@@ -301,8 +310,12 @@ class HIMPPO:
 
 
                     loss += amp_loss
-                    self.amp_normalizer.update(amp_obs_batch.cpu().detach().numpy())
-                    self.amp_normalizer.update(amp_expert_obs_batch.cpu().detach().numpy())
+                    self.amp_normalizer.update(
+                        raw_amp_obs_batch.cpu().detach().numpy()
+                    )
+                    self.amp_normalizer.update(
+                        raw_amp_expert_obs_batch.cpu().detach().numpy()
+                    )
 
                 # Gradient step
                 self.optimizer.zero_grad()

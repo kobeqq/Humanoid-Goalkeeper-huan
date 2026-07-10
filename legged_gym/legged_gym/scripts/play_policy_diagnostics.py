@@ -408,6 +408,17 @@ def collect_step(
         "actions": to_numpy(actions[:n]),
     }
 
+    if hasattr(env, "root_states"):
+        world_vel = env.root_states[:n, 7:10]
+        row["base_world_vx"] = to_numpy(world_vel[:, 0])
+        row["base_world_vy"] = to_numpy(world_vel[:, 1])
+        row["base_world_vz"] = to_numpy(world_vel[:, 2])
+    if hasattr(env, "base_lin_acc"):
+        row["com_vertical_acc"] = to_numpy(env.base_lin_acc[:n, 2])
+    if hasattr(env, "rew_buf"):
+        # env.rew_buf is the raw task reward before the runner mixes in AMP.
+        row["raw_task_reward"] = to_numpy(env.rew_buf[:n])
+
     for attr in ("dof_pos", "dof_vel", "torques"):
         if hasattr(env, attr):
             row[attr] = to_numpy(getattr(env, attr)[:n])
@@ -434,6 +445,7 @@ def collect_step(
 
     if hasattr(env, "rigid_body_states") and foot_indices is not None:
         foot_world = env.rigid_body_states[:n, foot_indices, 0:3]
+        foot_vel_world = env.rigid_body_states[:n, foot_indices, 7:10]
         rel = foot_world - base_pos[:, None, :]
         foot_base = quat_rotate_inverse(quat[:, None, :].expand(-1, 2, -1).reshape(-1, 4), rel.reshape(-1, 3)).view(n, 2, 3)
         row.update(
@@ -444,6 +456,12 @@ def collect_step(
                 "right_foot_x_base": to_numpy(foot_base[:, 1, 0]),
                 "right_foot_y_base": to_numpy(foot_base[:, 1, 1]),
                 "right_foot_z_base": to_numpy(foot_base[:, 1, 2]),
+                "left_foot_vx_world": to_numpy(foot_vel_world[:, 0, 0]),
+                "left_foot_vy_world": to_numpy(foot_vel_world[:, 0, 1]),
+                "left_foot_vz_world": to_numpy(foot_vel_world[:, 0, 2]),
+                "right_foot_vx_world": to_numpy(foot_vel_world[:, 1, 0]),
+                "right_foot_vy_world": to_numpy(foot_vel_world[:, 1, 1]),
+                "right_foot_vz_world": to_numpy(foot_vel_world[:, 1, 2]),
             }
         )
         metadata["foot_position_frame"] = "base"
@@ -496,6 +514,21 @@ def metric_range(raw: Dict[str, np.ndarray], mask: np.ndarray, key: str) -> floa
     return float(np.nanmax(vals) - np.nanmin(vals))
 
 
+def mean_run_duration(values: np.ndarray, target: bool, dt: float) -> float:
+    states = np.asarray(values, dtype=bool)
+    lengths: List[int] = []
+    run = 0
+    for value in states:
+        if bool(value) == target:
+            run += 1
+        elif run:
+            lengths.append(run)
+            run = 0
+    if run:
+        lengths.append(run)
+    return float(np.mean(lengths) * dt) if lengths else 0.0
+
+
 def compute_episode_metrics(raw: Dict[str, np.ndarray], warmup_s: float, extra_keys: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     if "episode_id" not in raw:
         return []
@@ -538,11 +571,37 @@ def compute_episode_metrics(raw: Dict[str, np.ndarray], warmup_s: float, extra_k
             "base_z_vel_rms": math.sqrt(finite_mean(vz * vz)),
             "roll_pitch_rms": math.sqrt(finite_mean(np.asarray(raw["roll"][stat_mask], dtype=float) ** 2 + np.asarray(raw["pitch"][stat_mask], dtype=float) ** 2)),
         }
+        if "raw_task_reward" in raw:
+            row["raw_task_reward_mean_per_step"] = finite_mean(raw["raw_task_reward"][stat_mask])
+        if "com_vertical_acc" in raw:
+            az = np.asarray(raw["com_vertical_acc"][stat_mask], dtype=float)
+            row["com_vertical_acc_rms"] = math.sqrt(finite_mean(az * az))
+        # In body coordinates, atan2(vy, vx) is exactly the signed angle
+        # between body heading and horizontal velocity direction.
+        moving = speed_norm_series > 0.05
+        if moving.any():
+            heading_velocity_angle = np.arctan2(vy[moving], vx[moving])
+            expected_velocity_angle = math.atan2(cmd_vy, cmd_vx)
+            angle_error = np.arctan2(
+                np.sin(heading_velocity_angle - expected_velocity_angle),
+                np.cos(heading_velocity_angle - expected_velocity_angle),
+            )
+            row["heading_velocity_angle_abs_mean_deg"] = math.degrees(
+                finite_mean(np.abs(heading_velocity_angle))
+            )
+            row["heading_velocity_angle_rms_deg"] = math.degrees(
+                math.sqrt(finite_mean(heading_velocity_angle * heading_velocity_angle))
+            )
+            row["heading_velocity_angle_error_abs_mean_deg"] = math.degrees(
+                finite_mean(np.abs(angle_error))
+            )
         if "left_contact" in raw and "right_contact" in raw:
             lc = np.asarray(raw["left_contact"][stat_mask], dtype=float) > 0.5
             rc = np.asarray(raw["right_contact"][stat_mask], dtype=float) > 0.5
             state = lc.astype(int) * 2 + rc.astype(int)
             duration = max(float(np.asarray(raw["time"][stat_mask])[-1] - np.asarray(raw["time"][stat_mask])[0]), 1.0e-6)
+            times = np.asarray(raw["time"][stat_mask], dtype=float)
+            dt = float(np.median(np.diff(times))) if len(times) > 1 else 0.0
             row.update(
                 {
                     "left_contact_ratio": finite_mean(lc.astype(float)),
@@ -553,6 +612,10 @@ def compute_episode_metrics(raw: Dict[str, np.ndarray], warmup_s: float, extra_k
                     "left_only_ratio": finite_mean((lc & ~rc).astype(float)),
                     "right_only_ratio": finite_mean((~lc & rc).astype(float)),
                     "contact_switch_count": float(np.count_nonzero(np.diff(state)) / duration),
+                    "left_stance_duration_mean": mean_run_duration(lc, True, dt),
+                    "left_swing_duration_mean": mean_run_duration(lc, False, dt),
+                    "right_stance_duration_mean": mean_run_duration(rc, True, dt),
+                    "right_swing_duration_mean": mean_run_duration(rc, False, dt),
                 }
             )
         for prefix in ("left", "right"):
@@ -579,6 +642,10 @@ def compute_episode_metrics(raw: Dict[str, np.ndarray], warmup_s: float, extra_k
             torques = np.asarray(raw["torques"][stat_mask], dtype=float)
             limits = np.asarray(extra_keys["torque_limits"], dtype=float).reshape(1, -1)
             row["torque_limit_ratio"] = finite_mean((np.abs(torques) > 0.9 * limits).astype(float))
+            row["torque_saturation_ratio"] = finite_mean((np.abs(torques) >= 0.999 * limits).astype(float))
+            row["steps_with_any_torque_saturation_ratio"] = finite_mean(
+                np.any(np.abs(torques) >= 0.999 * limits, axis=1).astype(float)
+            )
         rows.append(row)
     return rows
 

@@ -69,18 +69,29 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
 
     class rewards(K1MoveAmpCfg.rewards):
         class scales:
-            tracking_lin_vel = 4.5
+            # Task: command completion only.
+            tracking_lin_vel = 3.0
             tracking_ang_vel = 0.1
-            upright = 1.0
-            height = 0.5
-            yaw_stability = 0.0
             stand_still = 0.3
-            gait_phase = 0.5
-            feet_slip = -0.05
+
+            # The gait clock remains an actor input, but no longer supplies a
+            # style reward. AMP is responsible for the motion style.
+            gait_phase = 0.0
+
+            # Regularization: stability and physical plausibility only.
+            upright = 0.7
+            height = 0.25
+            yaw_stability = 0.0
+            feet_slip = -0.1
+            feet_air_time = 0.25
+            bilateral_flight = -0.5
+            base_vz = -0.5
+            vertical_acc = -0.002
+            soft_heading = -0.5
             ang_vel_xy = -0.03
             dof_acc = -2.5e-7
             smoothness = -0.004
-            torques = -1e-5
+            torques = -2e-5
             dof_vel = -5e-4
             dof_pos_limits = -1.5
             dof_vel_limits = -0.1
@@ -99,6 +110,13 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         gait_phase_max_frequency = 2.1
         gait_phase_swing_height = 0.055
         gait_phase_sigma = 0.6
+        locomotion_min_speed = 0.06
+        foot_contact_threshold = 1.0
+        flight_grace_s = 0.05
+        feet_air_time_target = 0.22
+        feet_air_time_sigma = 0.01
+        feet_air_time_min = 0.08
+        heading_deadzone = math.radians(15.0)
         height_sigma = 0.04
         stand_still_sigma = 0.1
         termination_knee_height = 0.10
@@ -116,18 +134,18 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
             command = 0.02
 
     class amp(K1MoveAmpCfg.amp):
-        obs_type = "lower_body_state"
+        obs_type = "locomotion_style"
         use_all_dofs = False
         use_leg_dofs = True
         include_dof_vel = True
         num_steps = 2
-        num_obs_per_step = 32
+        num_obs_per_step = 46
         num_obs = num_obs_per_step * num_steps
         enable_discriminator = True
         skip_base_motion_init = True
-        amp_coef = 0.20
-        reward_mode = "mixture"
-        amp_scale = 1.0
+        amp_coef = 0.40
+        reward_mode = "additive"
+        amp_scale = 0.5
         command_motion_map = {
             "standing": "standing",
             "forward": "forward",
@@ -135,12 +153,11 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
             "leftstep": "leftstep",
             "rightstep": "rightstep",
             "diagonal_left": "diagonal",
-            # Prefer mirrored or direction-specific data here when it becomes available.
-            "diagonal_right": "diagonal",
+            "diagonal_right": "diagonal_right",
         }
-        adaptive_amp_scale = False
-        amp_target_fraction = 0.0
-        amp_scale_min = 0.0
+        adaptive_amp_scale = True
+        amp_target_fraction = 0.40
+        amp_scale_min = 0.20
         amp_scale_max = 1.0
         amp_scale_ema_alpha = 0.02
 
@@ -156,6 +173,7 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
             "leftstep": 1.0,
             "rightstep": 1.0,
             "diagonal": 1.0,
+            "diagonal_right": 1.0,
             "dive_jump": 0.0,
             "turn_or_yaw_heavy": 0.0,
         }
@@ -163,9 +181,9 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
 
 class K1LocoAmpCfgPPO(K1MoveAmpCfgPPO):
     class runner(K1MoveAmpCfgPPO.runner):
-        run_name = "k1_loco_amp"
-        experiment_name = "k1_loco_amp"
-        wandb_project = "k1_loco_amp"
+        run_name = "k1_loco_amp_v2"
+        experiment_name = "k1_loco_amp_v2"
+        wandb_project = "k1_loco_amp_v2"
 
     class policy(K1MoveAmpCfgPPO.policy):
         estimate_ball_dim = 0

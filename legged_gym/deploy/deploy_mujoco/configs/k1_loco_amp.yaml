@@ -1,6 +1,6 @@
 task: k1_loco_amp
 
-policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/k1_loco_amp/exported/policies/k1_loco_amp.pt"
+policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/k1_loco_amp_v2/exported/policies/k1_loco_amp.pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/k1/urdf/K1_22dof.xml"
 
 simulation_duration: 60.0

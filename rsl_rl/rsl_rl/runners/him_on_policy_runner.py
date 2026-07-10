@@ -99,11 +99,16 @@ class _MultiMotionBuffer:
         for name in names:
             name_lower = str(name).lower()
             exact = [i for i, candidate in enumerate(self.name_lowers) if candidate == name_lower]
+            if exact:
+                for idx in exact:
+                    if idx not in resolved:
+                        resolved.append(idx)
+                continue
             partial = [
                 i for i, candidate in enumerate(self.name_lowers)
                 if name_lower in candidate or candidate in name_lower
             ]
-            for idx in exact + partial:
+            for idx in partial:
                 if idx not in resolved:
                     resolved.append(idx)
         return resolved
@@ -249,6 +254,29 @@ class HIMOnPolicyRunner:
                 if command_names is None:
                     command_names = [str(i) for i in range(len(command_motion_names))]
                 print(f"[AMP] command motion map: {dict(zip(command_names, command_motion_names))}")
+                for motion_id, (command_name, motion_name) in enumerate(
+                    zip(command_names, command_motion_names)
+                ):
+                    buffer_indices = motion_buffer.command_buffer_indices[motion_id]
+                    print(
+                        "[AMP] command mapping: "
+                        f"command={command_name}, motion_id={motion_id}, "
+                        f"motion_name={motion_name}, buffer_indices={buffer_indices}"
+                    )
+                validation_ids = torch.arange(len(command_names), device=self.device)
+                validation_obs = motion_buffer.get_expert_obs(
+                    batch_size=len(command_names), motion_ids=validation_ids
+                )
+                expected_amp_dim = int(self.amp_cfg['num_obs'])
+                if validation_obs.shape != (len(command_names), expected_amp_dim):
+                    raise RuntimeError(
+                        "AMP expert observation shape mismatch: "
+                        f"got {tuple(validation_obs.shape)}, "
+                        f"expected {(len(command_names), expected_amp_dim)}"
+                    )
+                if not torch.isfinite(validation_obs).all():
+                    raise RuntimeError("AMP expert observation validation found non-finite values.")
+                print(f"[AMP] expert observation validation: shape={tuple(validation_obs.shape)}")
             if self.amp_log_network:
                 print(f"[AMP] discriminator network:\n{amp}")
         else:
@@ -336,10 +364,28 @@ class HIMOnPolicyRunner:
         tot_iter = start_iter + num_learning_iterations
         for it in range(start_iter, tot_iter):
             start = time.time()
+            rollout_raw_reward_mean = 0.0
+            rollout_amp_reward_mean = 0.0
+            rollout_task_contribution_mean = 0.0
+            rollout_amp_contribution_mean = 0.0
+            rollout_amp_normalizer_clip_ratio = 0.0
+            rollout_motion_id_counts = (
+                torch.zeros(
+                    len(getattr(self.env, "amp_command_names", [])),
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                if self.enable_discriminator else None
+            )
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     amp_motion_ids = self._get_amp_motion_ids() if self.enable_discriminator else None
+                    if rollout_motion_id_counts is not None and amp_motion_ids is not None:
+                        rollout_motion_id_counts += torch.bincount(
+                            amp_motion_ids.view(-1).long(),
+                            minlength=rollout_motion_id_counts.numel(),
+                        )[:rollout_motion_id_counts.numel()]
                     actions = self.alg.act(obs, critic_obs)
                     obs, privileged_obs, raw_rewards, dones, infos, termination_ids, termination_privileged_obs = self.env.step(actions)
 
@@ -370,12 +416,22 @@ class HIMOnPolicyRunner:
                                 )
                                 alpha = min(max(float(self.amp_scale_ema_alpha), 0.0), 1.0)
                                 self.amp_scale = (1.0 - alpha) * float(self.amp_scale) + alpha * float(target_scale.item())
-                            rewards = raw_rewards + self.amp_scale * amp_reward
+                            task_contribution = raw_rewards
+                            amp_contribution = self.amp_scale * amp_reward
                         else:
-                            rewards = amp_reward * self.amp_coef + raw_rewards * (1 - self.amp_coef)
+                            task_contribution = raw_rewards * (1 - self.amp_coef)
+                            amp_contribution = amp_reward * self.amp_coef
+                        rewards = task_contribution + amp_contribution
                     else:
                         amp_reward = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+                        task_contribution = raw_rewards
+                        amp_contribution = torch.zeros_like(raw_rewards)
                         rewards = raw_rewards
+
+                    rollout_raw_reward_mean += raw_rewards.detach().mean().item()
+                    rollout_amp_reward_mean += amp_reward.detach().mean().item()
+                    rollout_task_contribution_mean += task_contribution.detach().mean().item()
+                    rollout_amp_contribution_mean += amp_contribution.detach().mean().item()
 
                     if hasattr(self.env, "record_amp_reward"):
                         self.env.record_amp_reward(amp_reward, active_mask=(dones <= 0))
@@ -411,6 +467,25 @@ class HIMOnPolicyRunner:
 
                 stop = time.time()
                 collection_time = stop - start
+                rollout_raw_reward_mean /= self.num_steps_per_env
+                rollout_amp_reward_mean /= self.num_steps_per_env
+                rollout_task_contribution_mean /= self.num_steps_per_env
+                rollout_amp_contribution_mean /= self.num_steps_per_env
+                reward_contribution_abs_sum = (
+                    abs(rollout_task_contribution_mean) + abs(rollout_amp_contribution_mean)
+                )
+                rollout_amp_abs_fraction = (
+                    abs(rollout_amp_contribution_mean) / reward_contribution_abs_sum
+                    if reward_contribution_abs_sum > 1e-12 else 0.0
+                )
+                if self.enable_discriminator and self.alg.amp_normalizer is not None:
+                    normalized_amp_state = self.alg.amp_normalizer.normalize_torch(
+                        amp_state_, self.device
+                    )
+                    clip_value = float(self.alg.amp_normalizer.clip_obs)
+                    rollout_amp_normalizer_clip_ratio = (
+                        torch.abs(normalized_amp_state) >= clip_value - 1e-6
+                    ).float().mean().item()
 
                 # Learning step
                 start = stop
@@ -467,6 +542,34 @@ class HIMOnPolicyRunner:
         self.writer.add_scalar('Loss/amp_expert_loss', locs['expert_loss'], locs['it'])
         self.writer.add_scalar('Loss/amp_policy_loss', locs['policy_loss'], locs['it'])
         self.writer.add_scalar('Train/amp_scale', self.amp_scale, locs['it'])
+        self.writer.add_scalar('Train/rollout_raw_task_reward_mean', locs['rollout_raw_reward_mean'], locs['it'])
+        self.writer.add_scalar('Train/rollout_raw_amp_reward_mean', locs['rollout_amp_reward_mean'], locs['it'])
+        self.writer.add_scalar('Train/rollout_task_contribution_mean', locs['rollout_task_contribution_mean'], locs['it'])
+        self.writer.add_scalar('Train/rollout_amp_contribution_mean', locs['rollout_amp_contribution_mean'], locs['it'])
+        self.writer.add_scalar('Train/rollout_amp_abs_fraction', locs['rollout_amp_abs_fraction'], locs['it'])
+        self.writer.add_scalar('Train/amp_normalizer_clip_ratio', locs['rollout_amp_normalizer_clip_ratio'], locs['it'])
+        if self.alg.amp_normalizer is not None:
+            amp_norm_std = self.alg.amp_normalizer.var ** 0.5
+            self.writer.add_scalar(
+                'Train/amp_normalizer_mean_abs',
+                float(abs(self.alg.amp_normalizer.mean).mean()),
+                locs['it'],
+            )
+            self.writer.add_scalar(
+                'Train/amp_normalizer_std_min', float(amp_norm_std.min()), locs['it']
+            )
+            self.writer.add_scalar(
+                'Train/amp_normalizer_std_max', float(amp_norm_std.max()), locs['it']
+            )
+        if locs['rollout_motion_id_counts'] is not None:
+            motion_total = max(int(locs['rollout_motion_id_counts'].sum().item()), 1)
+            for motion_id, command_name in enumerate(
+                getattr(self.env, "amp_command_names", [])
+            ):
+                fraction = float(locs['rollout_motion_id_counts'][motion_id].item()) / motion_total
+                self.writer.add_scalar(
+                    f'Train/command_fraction/{motion_id}_{command_name}', fraction, locs['it']
+                )
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -591,6 +694,15 @@ class HIMOnPolicyRunner:
             'iter': self.current_learning_iteration + 1,
             'infos': infos,
             }
+        if self.enable_discriminator and self.alg.amp is not None:
+            state_dict['amp_state_dict'] = self.alg.amp.state_dict()
+        if self.alg.amp_normalizer is not None:
+            state_dict['amp_normalizer'] = {
+                'mean': self.alg.amp_normalizer.mean,
+                'var': self.alg.amp_normalizer.var,
+                'count': self.alg.amp_normalizer.count,
+            }
+        state_dict['amp_scale'] = self.amp_scale
         torch.save(state_dict, path)
 
 
@@ -598,8 +710,40 @@ class HIMOnPolicyRunner:
         loaded_dict = torch.load(path, map_location=self.device)
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
 
-        if load_optimizer:
+        if self.enable_discriminator and self.alg.amp is not None:
+            if 'amp_state_dict' in loaded_dict:
+                self.alg.amp.load_state_dict(loaded_dict['amp_state_dict'])
+            else:
+                warnings.warn(
+                    "Checkpoint has no AMP discriminator state; it will be randomly initialized. "
+                    "Use a newly saved checkpoint before resuming AMP training.",
+                    RuntimeWarning,
+                )
+        normalizer_state = loaded_dict.get('amp_normalizer')
+        if self.alg.amp_normalizer is not None and normalizer_state is not None:
+            self.alg.amp_normalizer.mean = normalizer_state['mean']
+            self.alg.amp_normalizer.var = normalizer_state['var']
+            self.alg.amp_normalizer.count = normalizer_state['count']
+        elif self.alg.amp_normalizer is not None:
+            warnings.warn(
+                "Checkpoint has no AMP normalizer state; raw-observation statistics will restart.",
+                RuntimeWarning,
+            )
+        self.amp_scale = float(loaded_dict.get('amp_scale', self.amp_scale))
+
+        can_restore_amp_training = (
+            not self.enable_discriminator
+            or self.alg.amp is None
+            or ('amp_state_dict' in loaded_dict and normalizer_state is not None)
+        )
+        if load_optimizer and can_restore_amp_training:
             self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
+        elif load_optimizer:
+            warnings.warn(
+                "Skipped optimizer restore because this legacy checkpoint cannot restore "
+                "the discriminator/normalizer that its AMP optimizer moments belong to.",
+                RuntimeWarning,
+            )
         self.current_learning_iteration = loaded_dict['iter']
         return loaded_dict['infos']
 

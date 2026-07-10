@@ -8,8 +8,56 @@ from isaacgym.torch_utils import torch_rand_float
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.envs.base.legged_robot_move_amp_2d import LeggedRobotMoveAmp2D, euler_from_quaternion, wrap_to_pi
-from legged_gym.envs.g1.g1_utils import MotionLib, build_lower_body_amp_step_obs, load_imitation_dataset
+from legged_gym.envs.g1.g1_utils import MotionLib, build_locomotion_amp_step_obs, load_imitation_dataset
 from legged_gym.utils.math import quat_rotate_inverse
+
+
+class _MirroredLocomotionMotion:
+    """Mirror a left-diagonal lower-body motion into a right-diagonal motion."""
+
+    def __init__(self, source, obs_dim_per_step):
+        self.source = source
+        self.obs_dim_per_step = obs_dim_per_step
+        if obs_dim_per_step != 46:
+            raise ValueError(f"mirrored locomotion AMP expects 46 dims, got {obs_dim_per_step}")
+
+    @staticmethod
+    def _mirror_leg_state(values):
+        # Per-leg order: hip yaw, hip roll, hip pitch, knee pitch,
+        # ankle pitch, ankle roll. Sagittal reflection swaps legs and flips
+        # the yaw/roll axes.
+        sign = values.new_tensor([-1.0, -1.0, 1.0, 1.0, 1.0, -1.0])
+        return torch.cat((values[..., 6:12] * sign, values[..., 0:6] * sign), dim=-1)
+
+    def _mirror_obs(self, obs):
+        steps = obs.view(obs.shape[0], -1, self.obs_dim_per_step)
+        mirrored = steps.clone()
+        mirrored[..., 0:12] = self._mirror_leg_state(steps[..., 0:12])
+        mirrored[..., 12:24] = self._mirror_leg_state(steps[..., 12:24])
+        mirrored[..., 25] *= -1.0  # base linear velocity y
+        mirrored[..., 27] *= -1.0  # base angular velocity x
+        mirrored[..., 29] *= -1.0  # base angular velocity z
+        mirrored[..., 31] *= -1.0  # projected gravity y
+        left_pos = steps[..., 34:37].clone()
+        right_pos = steps[..., 37:40].clone()
+        left_vel = steps[..., 40:43].clone()
+        right_vel = steps[..., 43:46].clone()
+        mirrored[..., 34:37] = right_pos * right_pos.new_tensor([1.0, -1.0, 1.0])
+        mirrored[..., 37:40] = left_pos * left_pos.new_tensor([1.0, -1.0, 1.0])
+        mirrored[..., 40:43] = right_vel * right_vel.new_tensor([1.0, -1.0, 1.0])
+        mirrored[..., 43:46] = left_vel * left_vel.new_tensor([1.0, -1.0, 1.0])
+        return mirrored.reshape(obs.shape[0], -1)
+
+    def get_expert_obs(self, batch_size):
+        return self._mirror_obs(self.source.get_expert_obs(batch_size))
+
+    def sample_reference_state(self, batch_size, random_time=True):
+        state = self.source.sample_reference_state(batch_size, random_time=random_time)
+        return {
+            "dof_pos": self._mirror_leg_state(state["dof_pos"]),
+            "dof_vel": self._mirror_leg_state(state["dof_vel"]),
+            "base_z": state["base_z"],
+        }
 
 
 class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
@@ -45,7 +93,31 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         self.episode_amp_reward_sum = torch.zeros(n, dtype=torch.float, device=device)
         self.episode_fall = torch.zeros(n, dtype=torch.float, device=device)
         self.episode_steps = torch.zeros(n, dtype=torch.float, device=device)
+        self.feet_air_time = torch.zeros(n, 2, dtype=torch.float, device=device)
+        self.last_foot_contacts = torch.zeros(n, 2, dtype=torch.bool, device=device)
+        self.flight_time = torch.zeros(n, dtype=torch.float, device=device)
+        # Contact columns: left, right, both, neither.
+        self.episode_contact_sums = torch.zeros(n, 4, dtype=torch.float, device=device)
+        self.episode_double_flight_sum = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_touchdown_air_time_sum = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_touchdown_count = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_base_height_sum = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_base_height_sq_sum = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_base_vz_sq_sum = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_vertical_acc_sq_sum = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_torque_saturation_sum = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_any_torque_saturation_sum = torch.zeros(n, dtype=torch.float, device=device)
+        self.episode_forward_speed_sum = torch.zeros(n, dtype=torch.float, device=device)
         self.left_foot_index, self.right_foot_index = self._resolve_loco_foot_indices()
+        self.loco_foot_indices = (
+            torch.tensor(
+                [self.left_foot_index, self.right_foot_index],
+                dtype=torch.long,
+                device=device,
+            )
+            if self.left_foot_index is not None and self.right_foot_index is not None
+            else None
+        )
 
     def _resolve_loco_foot_indices(self):
         """Resolve left/right contact feet by body name, with an ordered fallback."""
@@ -98,6 +170,12 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
                 num_steps=num_steps,
                 include_dof_vel=True,
             )
+
+        if "diagonal" in self.motions and "diagonal_right" not in self.motions:
+            self.motions["diagonal_right"] = _MirroredLocomotionMotion(
+                self.motions["diagonal"], self.amp_obs_per_step
+            )
+            print("[k1_loco_amp] generated mirrored expert motion: diagonal -> diagonal_right")
 
         self._init_ref_motion_sampler()
         self.amp_motion_buffers = []
@@ -276,12 +354,16 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
     def get_amp_observations(self):
         q_leg = self.dof_pos[:, self.amp_lower_dof_indices]
         dq_leg = self.dof_vel[:, self.amp_lower_dof_indices]
-        return build_lower_body_amp_step_obs(
+        foot_rel_pos, foot_rel_vel = self._get_current_foot_state()
+        return build_locomotion_amp_step_obs(
             q_leg,
             dq_leg,
             self.base_lin_vel,
             self.base_ang_vel,
             self.projected_gravity,
+            self.torso_pos[:, 2:3],
+            foot_rel_pos,
+            foot_rel_vel,
         )
 
     def get_amp_motion_ids(self):
@@ -311,9 +393,11 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
 
         command_error = torch.norm(self.commands[:, :2] - self.base_lin_vel[:, :2], dim=-1)
         self.episode_speed_sum += torch.norm(self.base_lin_vel[:, :2], dim=-1)
+        self.episode_forward_speed_sum += self.base_lin_vel[:, 0]
         self.episode_command_error_sum += command_error
         self.episode_yaw_error_sum += torch.abs(self.yaw_error)
         self.episode_steps += 1.0
+        self._update_locomotion_diagnostics()
 
         joint_powers = torch.abs(self.torques * self.dof_vel).unsqueeze(1)
         self.joint_powers = torch.cat((joint_powers, self.joint_powers[:, :-1]), dim=1)
@@ -337,6 +421,56 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
             self._draw_debug_vis()
 
         return env_ids, termination_privileged_obs
+
+    def _foot_contacts(self):
+        if self.left_foot_index is None or self.right_foot_index is None:
+            return torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
+        threshold = float(getattr(self.cfg.rewards, "foot_contact_threshold", 1.0))
+        return self.contact_forces[:, self.loco_foot_indices, 2] > threshold
+
+    def _get_current_foot_state(self):
+        if self.left_foot_index is None or self.right_foot_index is None:
+            zeros = torch.zeros(self.num_envs, 2, 3, dtype=torch.float, device=self.device)
+            return zeros, zeros
+
+        feet_world_pos = self.rigid_body_states[:, self.loco_foot_indices, 0:3]
+        feet_world_vel = self.rigid_body_states[:, self.loco_foot_indices, 7:10]
+        torso_world_pos = self.torso_pos[:, None, :]
+        torso_world_vel = self.rigid_body_states[:, self.upper_body_index, 7:10][:, None, :]
+
+        torso_quat = self.rigid_body_states[:, self.upper_body_index, 3:7]
+        flat_quat = torso_quat[:, None, :].repeat(1, 2, 1).reshape(-1, 4)
+        rel_pos_world = (feet_world_pos - torso_world_pos).reshape(-1, 3)
+        rel_vel_world = (feet_world_vel - torso_world_vel).reshape(-1, 3)
+
+        foot_rel_pos = quat_rotate_inverse(flat_quat, rel_pos_world).view(self.num_envs, 2, 3)
+        foot_rel_vel = quat_rotate_inverse(flat_quat, rel_vel_world).view(self.num_envs, 2, 3)
+        return foot_rel_pos, foot_rel_vel
+
+    def _update_locomotion_diagnostics(self):
+        contacts = self._foot_contacts()
+        left = contacts[:, 0]
+        right = contacts[:, 1]
+        no_contact = ~left & ~right
+        self.flight_time = torch.where(
+            no_contact,
+            self.flight_time + self.dt,
+            torch.zeros_like(self.flight_time),
+        )
+        self.episode_contact_sums[:, 0] += left.float()
+        self.episode_contact_sums[:, 1] += right.float()
+        self.episode_contact_sums[:, 2] += (left & right).float()
+        self.episode_contact_sums[:, 3] += no_contact.float()
+        grace = float(getattr(self.cfg.rewards, "flight_grace_s", 0.05))
+        self.episode_double_flight_sum += (self.flight_time > grace).float()
+        height = self.torso_pos[:, 2]
+        self.episode_base_height_sum += height
+        self.episode_base_height_sq_sum += torch.square(height)
+        self.episode_base_vz_sq_sum += torch.square(self.base_lin_vel[:, 2])
+        self.episode_vertical_acc_sq_sum += torch.square(self.base_lin_acc[:, 2])
+        saturated = torch.abs(self.torques) >= 0.999 * self.torque_limits.unsqueeze(0)
+        self.episode_torque_saturation_sum += saturated.float().mean(dim=1)
+        self.episode_any_torque_saturation_sum += saturated.any(dim=1).float()
 
     def check_termination(self):
         cfg = self.cfg.rewards
@@ -371,6 +505,24 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         final_yaw_error = self.episode_yaw_error_sum[env_ids].clone() / episode_steps
         final_fall = self.episode_fall[env_ids].clone()
         final_amp_reward = self.episode_amp_reward_sum[env_ids].clone() / episode_lengths
+        final_contact_ratios = self.episode_contact_sums[env_ids].clone() / episode_steps.unsqueeze(-1)
+        final_double_flight_ratio = self.episode_double_flight_sum[env_ids].clone() / episode_steps
+        final_mean_air_time = self.episode_touchdown_air_time_sum[env_ids].clone() / torch.clamp(
+            self.episode_touchdown_count[env_ids].clone(), min=1.0
+        )
+        height_mean = self.episode_base_height_sum[env_ids].clone() / episode_steps
+        height_sq_mean = self.episode_base_height_sq_sum[env_ids].clone() / episode_steps
+        final_height_std = torch.sqrt(torch.clamp(height_sq_mean - torch.square(height_mean), min=0.0))
+        final_base_vz_rms = torch.sqrt(
+            self.episode_base_vz_sq_sum[env_ids].clone() / episode_steps
+        )
+        final_vertical_acc_rms = torch.sqrt(
+            self.episode_vertical_acc_sq_sum[env_ids].clone() / episode_steps
+        )
+        final_torque_saturation = self.episode_torque_saturation_sum[env_ids].clone() / episode_steps
+        final_any_torque_saturation = (
+            self.episode_any_torque_saturation_sum[env_ids].clone() / episode_steps
+        )
 
         if getattr(self.cfg.domain_rand, "randomize_rigid_props_on_reset", False):
             self.refresh_actor_rigid_shape_props(env_ids)
@@ -443,10 +595,26 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         ) * 2.0 * math.pi
 
         self.extras["episode"]["mean_speed"] = torch.mean(final_speed_sum / episode_lengths)
+        self.extras["episode"]["forward_speed"] = torch.mean(
+            self.episode_forward_speed_sum[env_ids].clone() / episode_steps
+        )
         self.extras["episode"]["mean_command_error"] = torch.mean(final_command_error)
         self.extras["episode"]["mean_yaw_error"] = torch.mean(final_yaw_error)
         self.extras["episode"]["fall_rate"] = torch.mean(final_fall)
         self.extras["episode"]["amp_reward_mean"] = torch.mean(final_amp_reward)
+        self.extras["episode"]["left_contact_ratio"] = torch.mean(final_contact_ratios[:, 0])
+        self.extras["episode"]["right_contact_ratio"] = torch.mean(final_contact_ratios[:, 1])
+        self.extras["episode"]["both_contact_ratio"] = torch.mean(final_contact_ratios[:, 2])
+        self.extras["episode"]["flight_ratio"] = torch.mean(final_contact_ratios[:, 3])
+        self.extras["episode"]["double_flight_ratio"] = torch.mean(final_double_flight_ratio)
+        self.extras["episode"]["feet_air_time_mean"] = torch.mean(final_mean_air_time)
+        self.extras["episode"]["base_height_std"] = torch.mean(final_height_std)
+        self.extras["episode"]["base_vz_rms"] = torch.mean(final_base_vz_rms)
+        self.extras["episode"]["vertical_acc_rms"] = torch.mean(final_vertical_acc_rms)
+        self.extras["episode"]["torque_saturation_ratio"] = torch.mean(final_torque_saturation)
+        self.extras["episode"]["steps_with_any_torque_saturation_ratio"] = torch.mean(
+            final_any_torque_saturation
+        )
 
         self.episode_speed_sum[env_ids] = 0.0
         self.episode_command_error_sum[env_ids] = 0.0
@@ -454,6 +622,20 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         self.episode_amp_reward_sum[env_ids] = 0.0
         self.episode_fall[env_ids] = 0.0
         self.episode_steps[env_ids] = 0.0
+        self.feet_air_time[env_ids] = 0.0
+        self.last_foot_contacts[env_ids] = False
+        self.flight_time[env_ids] = 0.0
+        self.episode_contact_sums[env_ids] = 0.0
+        self.episode_double_flight_sum[env_ids] = 0.0
+        self.episode_touchdown_air_time_sum[env_ids] = 0.0
+        self.episode_touchdown_count[env_ids] = 0.0
+        self.episode_base_height_sum[env_ids] = 0.0
+        self.episode_base_height_sq_sum[env_ids] = 0.0
+        self.episode_base_vz_sq_sum[env_ids] = 0.0
+        self.episode_vertical_acc_sq_sum[env_ids] = 0.0
+        self.episode_torque_saturation_sum[env_ids] = 0.0
+        self.episode_any_torque_saturation_sum[env_ids] = 0.0
+        self.episode_forward_speed_sum[env_ids] = 0.0
 
     def compute_reward(self):
         self.rew_buf[:] = 0.0
@@ -491,26 +673,44 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         sigma = max(float(getattr(self.cfg.rewards, "stand_still_sigma", 0.1)), 1e-6)
         return standing.float() * torch.exp(-leg_vel * sigma)
 
-    def _reward_gait_phase(self):
-        if self.left_foot_index is None or self.right_foot_index is None:
-            return torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+    def _moving_gate(self):
+        min_speed = float(getattr(self.cfg.rewards, "locomotion_min_speed", 0.06))
+        return (torch.norm(self.commands[:, :2], dim=-1) > min_speed).float()
 
-        left_z = (
-            self.rigid_body_states[:, self.left_foot_index, 2] - self.torso_pos[:, 2]
-        )
-        right_z = (
-            self.rigid_body_states[:, self.right_foot_index, 2] - self.torso_pos[:, 2]
-        )
-        cfg = self.cfg.rewards
-        swing_h = max(float(getattr(cfg, "gait_phase_swing_height", 0.055)), 1e-4)
-        sigma = max(float(getattr(cfg, "gait_phase_sigma", 0.6)), 1e-6)
-        target_diff = torch.sin(self.gait_phase)
-        actual_diff = torch.clamp((left_z - right_z) / swing_h, -2.0, 2.0)
+    def _reward_base_vz(self):
+        return torch.square(self.base_lin_vel[:, 2])
 
-        speed = torch.norm(self.commands[:, :2], dim=-1)
-        min_speed = float(getattr(cfg, "gait_phase_min_speed", 0.06))
-        full_speed = float(getattr(cfg, "gait_phase_full_speed", 0.30))
-        gate = torch.clamp(
-            (speed - min_speed) / max(full_speed - min_speed, 1e-4), 0.0, 1.0
-        )
-        return gate * torch.exp(-torch.square(actual_diff - target_diff) / sigma)
+    def _reward_vertical_acc(self):
+        return torch.square(self.base_lin_acc[:, 2])
+
+    def _reward_bilateral_flight(self):
+        grace = float(getattr(self.cfg.rewards, "flight_grace_s", 0.05))
+        return self._moving_gate() * (self.flight_time > grace).float()
+
+    def _reward_feet_air_time(self):
+        """Reward bounded single-foot swing durations only at touchdown.
+
+        This is intentionally not an unbounded air-time reward: simultaneous
+        flight is handled by a separate penalty and standing commands are gated
+        out, so the term cannot improve by turning walking into hopping.
+        """
+        contacts = self._foot_contacts()
+        self.feet_air_time += self.dt
+        touchdown = contacts & (~self.last_foot_contacts)
+        target = float(getattr(self.cfg.rewards, "feet_air_time_target", 0.22))
+        sigma = max(float(getattr(self.cfg.rewards, "feet_air_time_sigma", 0.01)), 1e-6)
+        minimum = float(getattr(self.cfg.rewards, "feet_air_time_min", 0.08))
+        valid_touchdown = touchdown & (self.feet_air_time >= minimum)
+        reward = torch.exp(-torch.square(self.feet_air_time - target) / sigma)
+        reward = torch.sum(reward * valid_touchdown.float(), dim=1) * self._moving_gate()
+        touchdown_air_time = torch.sum(self.feet_air_time * valid_touchdown.float(), dim=1)
+        self.episode_touchdown_air_time_sum += touchdown_air_time
+        self.episode_touchdown_count += valid_touchdown.float().sum(dim=1)
+        self.feet_air_time[contacts] = 0.0
+        self.last_foot_contacts[:] = contacts
+        return reward
+
+    def _reward_soft_heading(self):
+        deadzone = float(getattr(self.cfg.rewards, "heading_deadzone", math.radians(12.0)))
+        excess = torch.clamp(torch.abs(self.yaw_error) - deadzone, min=0.0)
+        return self._moving_gate() * torch.square(excess)

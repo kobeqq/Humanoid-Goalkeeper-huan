@@ -37,6 +37,49 @@ def build_lower_body_amp_step_obs(q_leg, dq_leg, base_lin_vel, base_ang_vel, pro
     return torch.cat((q_leg, dq_leg, base_lin_vel[:, :2], base_ang_vel, projected_gravity), dim=-1)
 
 
+def build_locomotion_amp_step_obs(
+    q_leg,
+    dq_leg,
+    base_lin_vel,
+    base_ang_vel,
+    projected_gravity,
+    base_height,
+    foot_rel_pos,
+    foot_rel_vel,
+):
+    """Build a hopping-sensitive locomotion AMP observation.
+
+    Output:
+        [N, 46] = 12 q + 12 dq + 3 base linear velocity + 3 base angular
+        velocity + 3 projected gravity + 1 base height + 6 foot relative
+        position + 6 foot relative velocity.
+
+    Unlike the legacy lower-body observation, this retains vertical velocity
+    and height, and adds continuous foot kinematics so the discriminator can
+    distinguish natural alternating steps from hopping without relying on
+    contact labels reconstructed from the offline clips.
+    """
+    if base_height.dim() == 1:
+        base_height = base_height.unsqueeze(-1)
+    if foot_rel_pos.dim() == 3:
+        foot_rel_pos = foot_rel_pos.reshape(foot_rel_pos.shape[0], -1)
+    if foot_rel_vel.dim() == 3:
+        foot_rel_vel = foot_rel_vel.reshape(foot_rel_vel.shape[0], -1)
+    return torch.cat(
+        (
+            q_leg,
+            dq_leg,
+            base_lin_vel,
+            base_ang_vel,
+            projected_gravity,
+            base_height,
+            foot_rel_pos,
+            foot_rel_vel,
+        ),
+        dim=-1,
+    )
+
+
 def euler_from_quaternion(quat_angle):
     """
     Convert a quaternion into euler angles (roll, pitch, yaw)
@@ -162,7 +205,9 @@ class MotionLib:
             #! Note: Quat to RPY, not sure the correctness
             self.motion_base_rpy[start:end] = torch.tensor(euler_from_quaternion(traj["base_pose"]), dtype=torch.float, device=sd)   
             self.motion_base_lin_vel[start:end-1] = (self.motion_base_pos[start+1:end] - self.motion_base_pos[start:end-1]) * self.fps
-            self.motion_base_ang_vel[start:end-1] = (self.motion_base_rpy[start+1:end] - self.motion_base_rpy[start:end-1]) * self.fps
+            rpy_delta = self.motion_base_rpy[start+1:end] - self.motion_base_rpy[start:end-1]
+            rpy_delta = torch.atan2(torch.sin(rpy_delta), torch.cos(rpy_delta))
+            self.motion_base_ang_vel[start:end-1] = rpy_delta * self.fps
             self.motion_base_lin_vel[end-1:end] = self.motion_base_lin_vel[end-2:end-1]
             self.motion_base_ang_vel[end-1:end] = self.motion_base_ang_vel[end-2:end-1]
             
@@ -193,6 +238,9 @@ class MotionLib:
             self.motion_keyframe_quat_local[start:end] = quat_mul_yaw_inverse(local_rotation.clone(), euler_xyz_to_quat(self.motion_keyframe_rpy[start:end]))
 
         self.amp_obs_type = amp_obs_type
+        self.left_foot_keyframe_idx, self.right_foot_keyframe_idx = self._resolve_foot_keyframe_indices(
+            keyframe_names
+        )
 
     @staticmethod
     def _normalize_datasets(datasets):
@@ -231,8 +279,10 @@ class MotionLib:
         motion_ids = start_ids + torch.floor(time_in_proportion * (end_ids - start_ids)).long()
         motion_dof = self._get_amp_obs(motion_ids).view(batch_size, -1)
 
+        # Match the policy's fixed 50 Hz transition interval. Randomizing this
+        # interval made expert two-frame observations temporally inconsistent
+        # with the policy observations seen by the discriminator.
         ratio = self.fps / self.env_fps
-        ratio *= torch.rand(batch_size, device=self.device) * 1.0 + 0.25  # Random ratio per sample
 
         for i in range(1, self.num_steps):
             next_pos = motion_ids + i * ratio
@@ -266,6 +316,48 @@ class MotionLib:
         quat = euler_xyz_to_quat(self.motion_base_rpy[idx])
         return quat_rotate_inverse(quat, self.motion_base_lin_vel[idx]).to(self.device)
 
+    @staticmethod
+    def _rotate_batch_to_body(quat, vectors):
+        flat_quat = quat[:, None, :].repeat(1, vectors.shape[1], 1).reshape(-1, 4)
+        flat_vectors = vectors.reshape(-1, 3)
+        rotated = quat_rotate_inverse(flat_quat, flat_vectors)
+        return rotated.reshape(vectors.shape[0], vectors.shape[1], 3)
+
+    @staticmethod
+    def _resolve_foot_keyframe_indices(keyframe_names):
+        lowered = [str(name).lower() for name in keyframe_names]
+
+        def pick(side_tokens, part_tokens):
+            for idx, name in enumerate(lowered):
+                if any(side in name for side in side_tokens) and any(part in name for part in part_tokens):
+                    return idx
+            return None
+
+        left = pick(("left", "l_"), ("foot", "ankle", "toe"))
+        right = pick(("right", "r_"), ("foot", "ankle", "toe"))
+        return left, right
+
+    def _get_motion_foot_state(self, frame_ids):
+        idx = frame_ids.to(self.storage_device)
+        batch = idx.shape[0]
+        if self.left_foot_keyframe_idx is None or self.right_foot_keyframe_idx is None:
+            zeros = torch.zeros(batch, 2, 3, dtype=torch.float, device=self.device)
+            return zeros, zeros
+
+        foot_ids = torch.tensor(
+            [self.left_foot_keyframe_idx, self.right_foot_keyframe_idx],
+            dtype=torch.long,
+            device=self.storage_device,
+        )
+        quat = euler_xyz_to_quat(self.motion_base_rpy[idx])
+        foot_pos_world = self.motion_keyframe_pos[idx][:, foot_ids]
+        foot_vel_world = self.motion_keyframe_lin_vel[idx][:, foot_ids]
+        base_pos_world = self.motion_base_pos[idx][:, None, :]
+        base_vel_world = self.motion_base_lin_vel[idx][:, None, :]
+        foot_rel_pos = self._rotate_batch_to_body(quat, foot_pos_world - base_pos_world)
+        foot_rel_vel = self._rotate_batch_to_body(quat, foot_vel_world - base_vel_world)
+        return foot_rel_pos.to(self.device), foot_rel_vel.to(self.device)
+
     def _get_amp_obs_blend(self, floor_idx, ceil_idx, linear_ratio):
         dof_pos = (
             self.motion_dof_pos[floor_idx] * (1 - linear_ratio) + self.motion_dof_pos[ceil_idx] * linear_ratio
@@ -277,7 +369,7 @@ class MotionLib:
         else:
             dof_vel = torch.zeros_like(dof_pos)
 
-        if self.amp_obs_type == "lower_body_state":
+        if self.amp_obs_type in ("lower_body_state", "locomotion_style"):
             base_lin_vel_world = (
                 self.motion_base_lin_vel[floor_idx] * (1 - linear_ratio)
                 + self.motion_base_lin_vel[ceil_idx] * linear_ratio
@@ -287,11 +379,56 @@ class MotionLib:
                 + self.motion_base_rpy[ceil_idx] * linear_ratio
             )
             base_lin_vel = quat_rotate_inverse(euler_xyz_to_quat(base_rpy), base_lin_vel_world).to(self.device)
-            base_ang_vel = (
+            base_ang_vel_world = (
                 self.motion_base_ang_vel[floor_idx] * (1 - linear_ratio)
                 + self.motion_base_ang_vel[ceil_idx] * linear_ratio
+            )
+            base_ang_vel = quat_rotate_inverse(
+                euler_xyz_to_quat(base_rpy), base_ang_vel_world
             ).to(self.device)
             gravity = self._project_gravity(floor_idx)
+            if self.amp_obs_type == "locomotion_style":
+                if self.left_foot_keyframe_idx is None or self.right_foot_keyframe_idx is None:
+                    foot_rel_pos = torch.zeros(
+                        dof_pos.shape[0], 2, 3, dtype=torch.float, device=self.device
+                    )
+                    foot_rel_vel = torch.zeros_like(foot_rel_pos)
+                else:
+                    foot_ids = torch.tensor(
+                        [self.left_foot_keyframe_idx, self.right_foot_keyframe_idx],
+                        dtype=torch.long,
+                        device=self.storage_device,
+                    )
+                    quat = euler_xyz_to_quat(base_rpy)
+                    foot_pos_world = (
+                        self.motion_keyframe_pos[floor_idx][:, foot_ids] * (1 - linear_ratio.unsqueeze(-1))
+                        + self.motion_keyframe_pos[ceil_idx][:, foot_ids] * linear_ratio.unsqueeze(-1)
+                    )
+                    foot_vel_world = (
+                        self.motion_keyframe_lin_vel[floor_idx][:, foot_ids] * (1 - linear_ratio.unsqueeze(-1))
+                        + self.motion_keyframe_lin_vel[ceil_idx][:, foot_ids] * linear_ratio.unsqueeze(-1)
+                    )
+                    base_pos_world = (
+                        self.motion_base_pos[floor_idx][:, None, :] * (1 - linear_ratio.unsqueeze(-1))
+                        + self.motion_base_pos[ceil_idx][:, None, :] * linear_ratio.unsqueeze(-1)
+                    )
+                    base_vel_world = base_lin_vel_world[:, None, :]
+                    foot_rel_pos = self._rotate_batch_to_body(quat, foot_pos_world - base_pos_world).to(self.device)
+                    foot_rel_vel = self._rotate_batch_to_body(quat, foot_vel_world - base_vel_world).to(self.device)
+                base_height = (
+                    self.motion_base_pos[floor_idx, 2:3] * (1 - linear_ratio)
+                    + self.motion_base_pos[ceil_idx, 2:3] * linear_ratio
+                ).to(self.device)
+                return build_locomotion_amp_step_obs(
+                    dof_pos,
+                    dof_vel,
+                    base_lin_vel,
+                    base_ang_vel,
+                    gravity,
+                    base_height,
+                    foot_rel_pos,
+                    foot_rel_vel,
+                )
             return build_lower_body_amp_step_obs(
                 dof_pos,
                 dof_vel,
@@ -317,8 +454,23 @@ class MotionLib:
         q_leg = self.motion_dof_pos[idx].to(self.device)
         dq_leg = self.motion_dof_vel[idx].to(self.device) if self.include_dof_vel else torch.zeros_like(q_leg)
         base_lin_vel = self._get_base_lin_vel_body(idx)
-        base_ang_vel = self.motion_base_ang_vel[idx].to(self.device)
+        base_ang_vel = quat_rotate_inverse(
+            euler_xyz_to_quat(self.motion_base_rpy[idx]),
+            self.motion_base_ang_vel[idx],
+        ).to(self.device)
         projected_gravity = self._get_projected_gravity_from_rpy(self.motion_base_rpy[idx]).to(self.device)
+        if self.amp_obs_type == "locomotion_style":
+            foot_rel_pos, foot_rel_vel = self._get_motion_foot_state(idx)
+            return build_locomotion_amp_step_obs(
+                q_leg,
+                dq_leg,
+                base_lin_vel,
+                base_ang_vel,
+                projected_gravity,
+                self.motion_base_pos[idx, 2:3].to(self.device),
+                foot_rel_pos,
+                foot_rel_vel,
+            )
         return build_lower_body_amp_step_obs(
             q_leg,
             dq_leg,
@@ -328,7 +480,7 @@ class MotionLib:
         )
 
     def _get_amp_obs(self, frame_ids):
-        if self.amp_obs_type == "lower_body_state":
+        if self.amp_obs_type in ("lower_body_state", "locomotion_style"):
             return self._get_amp_lower_body_state_obs(frame_ids)
         return self._get_amp_dof_obs(frame_ids)
 
