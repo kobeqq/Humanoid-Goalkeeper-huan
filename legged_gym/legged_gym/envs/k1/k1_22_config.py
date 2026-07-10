@@ -406,7 +406,7 @@ class K122CfgPPO( LeggedRobotCfgPPO ): #TODO: 这个类是用于创建PPO算法
     class runner( LeggedRobotCfgPPO.runner ):#TODO: 这个类是用于创建运行器
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'HIMPPO'     #HIMPPO：预测模型+环境推断模型+增强PPO算法
-        num_steps_per_env = 100 # 每次迭代中环境交互步数
+        num_steps_per_env = 32 # 每次迭代中环境交互步数
         max_iterations = 200000 # 最大迭代次数
 
         # logging

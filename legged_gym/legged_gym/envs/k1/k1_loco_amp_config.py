@@ -19,7 +19,7 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         play = False
 
     class commands(K1MoveAmpCfg.commands):
-        resampling_time = 2.0
+        resampling_time = 5
         max_vx = 0.35
         max_vy = 0.35
         max_wz = 0.5
