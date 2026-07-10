@@ -2,7 +2,7 @@
 
 Supports:
 - K1 Move AMP (`LeggedRobotMoveAmp`, obs 75 x 10 = 750)
-- K1 Loco AMP (`LeggedRobotK1LocoAmp`, obs 65 x 10 = 650)
+- K1 Loco AMP (`LeggedRobotK1LocoAmp`, obs 67 x 10 = 670)
 - K1 Goalkeeper Foundation (`LeggedRobotGoalkeeperFoundation`, obs 86 x 10 = 860)
 """
 
@@ -399,6 +399,7 @@ def build_loco_amp_one_step_obs(
     action,
     command,
     command_scale,
+    gait_phase,
     ang_vel_scale,
     dof_pos_scale,
     dof_vel_scale,
@@ -412,7 +413,25 @@ def build_loco_amp_one_step_obs(
     qj = (d.qpos[7:].astype(np.float32) - default_angles) * dof_pos_scale
     dqj = d.qvel[6:].astype(np.float32) * dof_vel_scale
     cmd_obs = np.asarray(command, dtype=np.float32) * np.asarray(command_scale, dtype=np.float32)
-    return np.concatenate((cmd_obs, omega, gravity, qj, dqj, action)).astype(np.float32)
+    phase_obs = np.array(
+        [math.sin(gait_phase), math.cos(gait_phase)], dtype=np.float32
+    )
+    return np.concatenate((cmd_obs, phase_obs, omega, gravity, qj, dqj, action)).astype(np.float32)
+
+
+def update_loco_gait_phase(gait_phase, command, cfg, policy_dt):
+    """Advance the locomotion clock exactly once per policy step."""
+    speed = float(np.linalg.norm(command[:2]))
+    min_speed = float(cfg.get("gait_phase_min_speed", 0.06))
+    if speed <= min_speed:
+        return gait_phase
+
+    base_freq = float(cfg.get("gait_phase_base_frequency", 1.15))
+    gain = float(cfg.get("gait_phase_speed_frequency_gain", 1.0))
+    min_freq = float(cfg.get("gait_phase_min_frequency", 1.0))
+    max_freq = float(cfg.get("gait_phase_max_frequency", 2.1))
+    freq = np.clip(base_freq + gain * speed, min_freq, max_freq)
+    return float((gait_phase + 2.0 * math.pi * freq * policy_dt) % (2.0 * math.pi))
 
 
 def infer_loco_command_name(command):
@@ -580,6 +599,7 @@ def build_current_one_step_obs(
     dof_pos_scale,
     dof_vel_scale,
     goal_z_scale,
+    loco_gait_phase=0.0,
 ):
     if is_foundation_task(cfg):
         obs_action = mask_upper_body_action(action, leg_indices)
@@ -609,6 +629,7 @@ def build_current_one_step_obs(
             action,
             command,
             command_scale,
+            loco_gait_phase,
             ang_vel_scale,
             dof_pos_scale,
             dof_vel_scale,
@@ -1015,6 +1036,7 @@ def main():
     filtered_target_dof_pos = target_dof_pos.copy()
     startup_target_anchor = target_dof_pos.copy()
     obs = None
+    loco_gait_phase = 0.0
 
     counter = 0
     use_policy = warmup_steps == 0
@@ -1081,6 +1103,10 @@ def main():
                 if loco_amp and command_ramp_steps > 0:
                     command_alpha = min(1.0, policy_update_counter / float(command_ramp_steps))
                 effective_loco_command = loco_command * command_alpha
+                if loco_amp:
+                    loco_gait_phase = update_loco_gait_phase(
+                        loco_gait_phase, effective_loco_command, cfg, control_dt
+                    )
                 one_step_obs = build_current_one_step_obs(
                     cfg,
                     d,
@@ -1098,6 +1124,7 @@ def main():
                     dof_pos_scale,
                     dof_vel_scale,
                     goal_z_scale,
+                    loco_gait_phase,
                 )
 
                 if not obs_history_initialized:

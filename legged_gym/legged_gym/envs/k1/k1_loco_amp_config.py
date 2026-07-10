@@ -8,7 +8,9 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
     class env(K1MoveAmpCfg.env):
         num_ballobs = 0
         num_actions = 12
-        num_command_obs = 3
+        # Command-related actor block: scaled (vx, vy, wz) + gait phase (sin, cos).
+        # self.commands itself remains three-dimensional.
+        num_command_obs = 5
         num_one_step_observations = num_command_obs + 3 + 3 + K122Cfg.env.num_dofs * 2 + num_actions
         num_privileged_obs = num_one_step_observations + 3
         num_observations = K122Cfg.env.num_actor_history * num_one_step_observations
@@ -53,7 +55,7 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         randomize_friction = True
         friction_range = [0.6, 1.5]
         randomize_restitution = False
-        restitution_range = [0.0, 0.05]
+        restitution_range = [0.0, 0.03]
         randomize_kp = True
         kp_range = [0.9, 1.1]
         randomize_kd = True
@@ -68,11 +70,12 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
     class rewards(K1MoveAmpCfg.rewards):
         class scales:
             tracking_lin_vel = 4.5
-            tracking_ang_vel = 0.5
+            tracking_ang_vel = 0.1
             upright = 1.0
             height = 0.5
-            yaw_stability = 0.5
+            yaw_stability = 0.0
             stand_still = 0.3
+            gait_phase = 0.5
             feet_slip = -0.05
             ang_vel_xy = -0.03
             dof_acc = -2.5e-7
@@ -87,6 +90,15 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         yaw_rate_sigma = 0.25
         yaw_sigma = 0.35
         yaw_limit = math.radians(45.0)
+        enable_yaw_termination = False
+        gait_phase_min_speed = 0.06
+        gait_phase_full_speed = 0.30
+        gait_phase_base_frequency = 1.15
+        gait_phase_speed_frequency_gain = 1.0
+        gait_phase_min_frequency = 1.0
+        gait_phase_max_frequency = 2.1
+        gait_phase_swing_height = 0.055
+        gait_phase_sigma = 0.6
         height_sigma = 0.04
         stand_still_sigma = 0.1
         termination_knee_height = 0.10
@@ -113,9 +125,9 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         num_obs = num_obs_per_step * num_steps
         enable_discriminator = True
         skip_base_motion_init = True
-        amp_coef = 0.45
-        reward_mode = "additive"
-        amp_scale = 2.0
+        amp_coef = 0.20
+        reward_mode = "mixture"
+        amp_scale = 1.0
         command_motion_map = {
             "standing": "standing",
             "forward": "forward",
@@ -123,12 +135,13 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
             "leftstep": "leftstep",
             "rightstep": "rightstep",
             "diagonal_left": "diagonal",
+            # Prefer mirrored or direction-specific data here when it becomes available.
             "diagonal_right": "diagonal",
         }
-        adaptive_amp_scale = True
-        amp_target_fraction = 0.40
-        amp_scale_min = 0.2
-        amp_scale_max = 10.0
+        adaptive_amp_scale = False
+        amp_target_fraction = 0.0
+        amp_scale_min = 0.0
+        amp_scale_max = 1.0
         amp_scale_ema_alpha = 0.02
 
     class dataset(K1MoveAmpCfg.dataset):

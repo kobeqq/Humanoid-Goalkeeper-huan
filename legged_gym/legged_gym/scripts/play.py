@@ -19,6 +19,7 @@ if not hasattr(np, "float"):
     np.float = float  # type: ignore[attr-defined]
 
 import isaacgym
+from isaacgym import gymapi
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs import *
 from legged_gym.utils import (
@@ -39,10 +40,12 @@ LOWER_LOCO_CMD_DURATION_S = 60.0
 OMNI_PLAY_RADIUS = 2.0
 OMNI_DIRECTION_NAMES = ("front", "left", "back", "right")
 OMNI_DIRECTION_CENTERS = (0.0, math.pi / 2.0, math.pi, -math.pi / 2.0)
+PLAY_CAMERA_OFFSET = np.array([2.0, -2.0, 1.2], dtype=np.float32)
+PLAY_CAMERA_TARGET_HEIGHT = 0.9
 
 
-def configure_play_env(env_cfg, task_name: str):
-    env_cfg.env.num_envs = 8 if task_name == "k1_omni_move_amp" else 6
+def configure_play_env(env_cfg, task_name: str, num_envs_override=None):
+    env_cfg.env.num_envs = 1 if num_envs_override is None else int(num_envs_override)
     env_cfg.env.play = True
     env_cfg.noise.add_noise = False
     env_cfg.domain_rand.randomize_initial_joint_pos = False
@@ -67,7 +70,6 @@ def configure_play_env(env_cfg, task_name: str):
         env_cfg.commands.yaw_ref_world = True
         env_cfg.commands.yaw_ref = 0.0
     elif task_name == "k1_loco_amp":
-        env_cfg.env.num_envs = 6
         env_cfg.env.episode_length_s = 6
         env_cfg.domain_rand.randomize_joint_injection = False
         env_cfg.domain_rand.randomize_actuation_offset = False
@@ -84,6 +86,31 @@ def configure_play_env(env_cfg, task_name: str):
         env_cfg.env.episode_length_s = 3
         env_cfg.domain_rand.randomize_friction = True
         env_cfg.domain_rand.push_interval_s = 6
+
+
+def _get_camera_target(env):
+    if hasattr(env, "rigid_body_states") and hasattr(env, "torso_index"):
+        target = env.rigid_body_states[0, env.torso_index, 0:3].detach().cpu().numpy()
+    elif hasattr(env, "root_states"):
+        target = env.root_states[0, 0:3].detach().cpu().numpy()
+    else:
+        target = np.zeros(3, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32).copy()
+    target[2] = max(float(target[2]), PLAY_CAMERA_TARGET_HEIGHT)
+    return target
+
+
+def update_play_camera(env):
+    if not getattr(env, "viewer", None):
+        return
+    target = _get_camera_target(env)
+    camera_pos = target + PLAY_CAMERA_OFFSET
+    env.gym.viewer_camera_look_at(
+        env.viewer,
+        None,
+        gymapi.Vec3(*camera_pos.tolist()),
+        gymapi.Vec3(*target.tolist()),
+    )
 
 
 def sync_play_obs(env):
@@ -211,7 +238,7 @@ def play(args):
     faulthandler.enable()
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
-    configure_play_env(env_cfg, args.task)
+    configure_play_env(env_cfg, args.task, num_envs_override=args.num_envs)
 
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
 
@@ -251,6 +278,8 @@ def play(args):
     else:
         obs = env.get_observations()
 
+    update_play_camera(env)
+
     if EXPORT_POLICY:
         policy_name = args.task
         path = os.path.join(
@@ -280,6 +309,7 @@ def play(args):
         step_ret = env.step(actions.detach())
         obs = step_ret[0]
         dones = step_ret[3]
+        update_play_camera(env)
 
         if args.task == "k1_goalkeeper_lower_loco" and torch.any(dones):
             reset_ids = (dones > 0).nonzero(as_tuple=False).flatten()

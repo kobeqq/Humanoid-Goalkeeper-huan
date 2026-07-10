@@ -25,6 +25,9 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         all_env_ids = torch.arange(self.num_envs, device=self.device)
         self.reset_yaw[:] = self.yaw
         self._resample_commands(all_env_ids)
+        self.gait_phase[all_env_ids] = torch.rand(
+            len(all_env_ids), device=self.device
+        ) * 2.0 * math.pi
 
     def _init_loco_command_buffers(self):
         n = self.num_envs
@@ -32,6 +35,7 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         self.commands = torch.zeros(n, 3, dtype=torch.float, device=device)
         self.command_type_ids = torch.zeros(n, dtype=torch.long, device=device)
         self.command_time_left = torch.zeros(n, dtype=torch.float, device=device)
+        self.gait_phase = torch.zeros(n, dtype=torch.float, device=device)
         self.reset_yaw = torch.zeros(n, dtype=torch.float, device=device)
         self.yaw_error = torch.zeros(n, dtype=torch.float, device=device)
         self.target_base_z = self.torso_pos[:, 2].clone()
@@ -41,6 +45,27 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         self.episode_amp_reward_sum = torch.zeros(n, dtype=torch.float, device=device)
         self.episode_fall = torch.zeros(n, dtype=torch.float, device=device)
         self.episode_steps = torch.zeros(n, dtype=torch.float, device=device)
+        self.left_foot_index, self.right_foot_index = self._resolve_loco_foot_indices()
+
+    def _resolve_loco_foot_indices(self):
+        """Resolve left/right contact feet by body name, with an ordered fallback."""
+        contact_indices = [int(index.item()) for index in self.contact_feet_indices]
+        named_indices = [
+            (str(self.body_names[index]).lower(), index) for index in contact_indices
+        ]
+        left = next((index for name, index in named_indices if "left" in name), None)
+        right = next((index for name, index in named_indices if "right" in name), None)
+        if left is not None and right is not None:
+            return left, right
+        if len(contact_indices) >= 2:
+            # K1 currently enumerates left_foot_link before right_foot_link. Keep a
+            # conservative fallback for assets whose body names omit side labels.
+            print(
+                "[k1_loco_amp] warning: could not resolve left/right foot by body name; "
+                "falling back to the first two contact feet."
+            )
+            return contact_indices[0], contact_indices[1]
+        return None, None
 
     def _reinit_amp_motions_for_lower_body(self):
         self.amp_lower_dof_names = self.lower_body_dof_names
@@ -165,7 +190,11 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
 
     def _command_actor_obs(self):
         scale = torch.tensor(self.cfg.commands.command_scale, dtype=torch.float, device=self.device).view(1, 3)
-        return self.commands * scale
+        command_obs = self.commands * scale
+        phase_obs = torch.stack(
+            (torch.sin(self.gait_phase), torch.cos(self.gait_phase)), dim=-1
+        )
+        return torch.cat((command_obs, phase_obs), dim=-1)
 
     def _build_actor_one_step_obs(self):
         return torch.cat(
@@ -191,6 +220,9 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         start = 0
         noise_vec[start : start + 3] = getattr(noise_scales, "command", 0.02) * noise_level
         start += 3
+        # The deterministic gait clock is not sensor data and receives no noise.
+        noise_vec[start : start + 2] = 0.0
+        start += 2
         noise_vec[start : start + 3] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
         start += 3
         noise_vec[start : start + 3] = noise_scales.gravity * noise_level
@@ -200,7 +232,27 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         noise_vec[start : start + self.num_dof] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
         start += self.num_dof
         noise_vec[start : start + self.num_actions] = 0.0
+        start += self.num_actions
+        if start != self.num_one_step_obs:
+            raise ValueError(
+                f"noise obs dim mismatch: filled {start}, expected {self.num_one_step_obs}"
+            )
         return noise_vec
+
+    def _update_gait_phase(self):
+        speed = torch.norm(self.commands[:, :2], dim=-1)
+        cfg = self.cfg.rewards
+        base_freq = float(getattr(cfg, "gait_phase_base_frequency", 1.15))
+        gain = float(getattr(cfg, "gait_phase_speed_frequency_gain", 1.0))
+        min_freq = float(getattr(cfg, "gait_phase_min_frequency", 1.0))
+        max_freq = float(getattr(cfg, "gait_phase_max_frequency", 2.1))
+        min_speed = float(getattr(cfg, "gait_phase_min_speed", 0.06))
+        freq = torch.clamp(base_freq + gain * speed, min=min_freq, max=max_freq)
+        moving = (speed > min_speed).float()
+        self.gait_phase = torch.remainder(
+            self.gait_phase + moving * 2.0 * math.pi * freq * self.dt,
+            2.0 * math.pi,
+        )
 
     def compute_observations(self):
         actor_obs = self._build_actor_one_step_obs()
@@ -255,6 +307,7 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         self.command_time_left -= self.dt
         resample_ids = (self.command_time_left <= 0.0).nonzero(as_tuple=False).flatten()
         self._resample_commands(resample_ids)
+        self._update_gait_phase()
 
         command_error = torch.norm(self.commands[:, :2] - self.base_lin_vel[:, :2], dim=-1)
         self.episode_speed_sum += torch.norm(self.base_lin_vel[:, :2], dim=-1)
@@ -298,7 +351,12 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
             torch.mean(torch.norm(self.contact_forces[:, self.contact_feet_indices, :], dim=-1), dim=-1)
             > float(getattr(cfg, "termination_contact_force_scale", 1.5)) * self.cfg.rewards.max_contact_force
         )
-        yaw_limit_buf = torch.abs(self.yaw_error) > float(getattr(cfg, "yaw_limit", math.radians(45.0)))
+        if getattr(cfg, "enable_yaw_termination", True):
+            yaw_limit_buf = torch.abs(self.yaw_error) > float(
+                getattr(cfg, "yaw_limit", math.radians(45.0))
+            )
+        else:
+            yaw_limit_buf = torch.zeros_like(self.time_out_buf, dtype=torch.bool)
         self.fall_buf = knee_height_buf | base_height_buf | self.gravity_termination_buf | sharpforce_buf
         self.reset_buf = self.time_out_buf | self.fall_buf | yaw_limit_buf
         self.episode_fall = torch.maximum(self.episode_fall, self.fall_buf.float())
@@ -380,6 +438,9 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         self.yaw_error[env_ids] = 0.0
         self.target_base_z[env_ids] = self.torso_pos[env_ids, 2]
         self._resample_commands(env_ids)
+        self.gait_phase[env_ids] = torch.rand(
+            len(env_ids), device=self.device
+        ) * 2.0 * math.pi
 
         self.extras["episode"]["mean_speed"] = torch.mean(final_speed_sum / episode_lengths)
         self.extras["episode"]["mean_command_error"] = torch.mean(final_command_error)
@@ -429,3 +490,27 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         leg_vel = torch.sum(torch.square(self.dof_vel[:, self.lower_body_dof_indices]), dim=-1)
         sigma = max(float(getattr(self.cfg.rewards, "stand_still_sigma", 0.1)), 1e-6)
         return standing.float() * torch.exp(-leg_vel * sigma)
+
+    def _reward_gait_phase(self):
+        if self.left_foot_index is None or self.right_foot_index is None:
+            return torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
+        left_z = (
+            self.rigid_body_states[:, self.left_foot_index, 2] - self.torso_pos[:, 2]
+        )
+        right_z = (
+            self.rigid_body_states[:, self.right_foot_index, 2] - self.torso_pos[:, 2]
+        )
+        cfg = self.cfg.rewards
+        swing_h = max(float(getattr(cfg, "gait_phase_swing_height", 0.055)), 1e-4)
+        sigma = max(float(getattr(cfg, "gait_phase_sigma", 0.6)), 1e-6)
+        target_diff = torch.sin(self.gait_phase)
+        actual_diff = torch.clamp((left_z - right_z) / swing_h, -2.0, 2.0)
+
+        speed = torch.norm(self.commands[:, :2], dim=-1)
+        min_speed = float(getattr(cfg, "gait_phase_min_speed", 0.06))
+        full_speed = float(getattr(cfg, "gait_phase_full_speed", 0.30))
+        gate = torch.clamp(
+            (speed - min_speed) / max(full_speed - min_speed, 1e-4), 0.0, 1.0
+        )
+        return gate * torch.exp(-torch.square(actual_diff - target_diff) / sigma)
