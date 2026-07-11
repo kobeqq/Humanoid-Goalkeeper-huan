@@ -4,6 +4,23 @@ from legged_gym.envs.k1.k1_loco_amp_config import K1LocoAmpCfg, K1LocoAmpCfgPPO
 
 
 class K1LocoAmpFullCfg(K1LocoAmpCfg):
+    class commands(K1LocoAmpCfg.commands):
+        resampling_time = 5
+        max_vx = 0.35
+        max_vy = 0.35
+        max_wz = 0.5
+        command_scale = [1.0 / max_vx, 1.0 / max_vy, 1.0 / max_wz]
+        train_yaw_command = False
+        motion_commands = {
+            "standing": {"prob": 0.10, "vx": [0.0, 0.0], "vy": [0.0, 0.0], "wz": [0.0, 0.0]},
+            "forward": {"prob": 0.15, "vx": [0.20, 0.35], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
+            "backward": {"prob": 0.15, "vx": [-0.32, -0.18], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
+            "leftstep": {"prob": 0.20, "vx": [-0.04, 0.04], "vy": [0.18, 0.32], "wz": [0.0, 0.0]},
+            "rightstep": {"prob": 0.20, "vx": [-0.04, 0.04], "vy": [-0.32, -0.18], "wz": [0.0, 0.0]},
+            "diagonal_left": {"prob": 0.10, "vx": [0.18, 0.32], "vy": [0.12, 0.28], "wz": [0.0, 0.0]},
+            "diagonal_right": {"prob": 0.10, "vx": [0.18, 0.32], "vy": [-0.28, -0.12], "wz": [0.0, 0.0]},
+        }
+
     class rewards(K1LocoAmpCfg.rewards):
         class scales(K1LocoAmpCfg.rewards.scales):
             tracking_lin_vel = 2.0
@@ -50,7 +67,7 @@ class K1LocoAmpFullCfg(K1LocoAmpCfg):
         enable_discriminator = True
         skip_base_motion_init = True
         reward_mode = "mixture"
-        amp_coef = 0.2
+        amp_coef = 0.3
         amp_scale = 1.0
         adaptive_amp_scale = False
         condition_on_command = False
