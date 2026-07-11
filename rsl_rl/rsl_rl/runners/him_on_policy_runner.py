@@ -373,13 +373,14 @@ class HIMOnPolicyRunner:
             rollout_task_contribution_mean = 0.0
             rollout_amp_contribution_mean = 0.0
             rollout_amp_normalizer_clip_ratio = 0.0
+            command_names = getattr(self.env, "amp_command_names", None) or []
             rollout_motion_id_counts = (
                 torch.zeros(
-                    len(getattr(self.env, "amp_command_names", [])),
+                    len(command_names),
                     dtype=torch.long,
                     device=self.device,
                 )
-                if self.enable_discriminator else None
+                if self.enable_discriminator and len(command_names) > 0 else None
             )
             # Rollout
             with torch.inference_mode():
@@ -566,11 +567,10 @@ class HIMOnPolicyRunner:
             self.writer.add_scalar(
                 'Train/amp_normalizer_std_max', float(amp_norm_std.max()), locs['it']
             )
-        if locs['rollout_motion_id_counts'] is not None:
+        command_names = getattr(self.env, "amp_command_names", None) or []
+        if locs['rollout_motion_id_counts'] is not None and len(command_names) > 0:
             motion_total = max(int(locs['rollout_motion_id_counts'].sum().item()), 1)
-            for motion_id, command_name in enumerate(
-                getattr(self.env, "amp_command_names", [])
-            ):
+            for motion_id, command_name in enumerate(command_names):
                 fraction = float(locs['rollout_motion_id_counts'][motion_id].item()) / motion_total
                 self.writer.add_scalar(
                     f'Train/command_fraction/{motion_id}_{command_name}', fraction, locs['it']
