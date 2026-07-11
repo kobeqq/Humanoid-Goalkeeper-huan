@@ -104,20 +104,39 @@ def euler_from_quaternion(quat_angle):
     return torch.cat([roll_x.view(-1, 1), pitch_y.view(-1, 1), yaw_z.view(-1, 1)], dim=1)
 
 
-def load_imitation_dataset(folder, mapping="joint_id.txt", suffix=".pt"):
-    # List all files with the given suffix (e.g., .pt)
-    filenames = [name for name in os.listdir(folder) if name.endswith(suffix)]
-    
+def load_imitation_dataset(
+    folder,
+    mapping="joint_id.txt",
+    suffix=".pt",
+    include_files=None,
+    exclude_files=None,
+):
+    filenames = sorted(name for name in os.listdir(folder) if name.endswith(suffix))
+    if include_files is not None:
+        include_files = set(include_files)
+        filenames = [name for name in filenames if name in include_files]
+    if exclude_files:
+        exclude_files = set(exclude_files)
+        filenames = [name for name in filenames if name not in exclude_files]
+
     multidataset = {}
     for filename in tqdm(filenames):
+        path = os.path.join(folder, filename)
         try:
-            data = torch.load(os.path.join(folder, filename))
+            try:
+                data = torch.load(path, map_location="cpu", weights_only=False)
+            except TypeError:
+                data = torch.load(path, map_location="cpu")
             if isinstance(data, dict):
                 dataset_list = [data]
             elif isinstance(data, list):
                 dataset_list = [traj for traj in data if isinstance(traj, dict)]
             else:
                 raise TypeError(f"Unsupported motion file payload type: {type(data).__name__}")
+
+            if len(dataset_list) == 0:
+                print(f"{filename} load warning: no dict trajectories found, skipping.")
+                continue
 
             random.shuffle(dataset_list)
             multidataset[filename[:-len(suffix)]] = dataset_list
@@ -126,6 +145,10 @@ def load_imitation_dataset(folder, mapping="joint_id.txt", suffix=".pt"):
             print(f"{filename} load failed!!! Error: {e}")
             continue
 
+    if not multidataset:
+        raise RuntimeError(
+            f"No imitation dataset loaded from {folder}. filenames={filenames}"
+        )
 
     # Read and process the joint_id mapping
     with open(mapping, "r") as file:

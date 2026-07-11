@@ -45,6 +45,7 @@ from .g1_loco_13.g1_loco_13_config import G1LOCO13Cfg, G1LOCO13CfgPPO
 from .k1.k1_move_amp_config import K1MoveAmpCfg, K1MoveAmpCfgPPO
 from .k1.k1_move_amp_2d_config import K1MoveAmp2DCfg, K1MoveAmp2DCfgPPO
 from .k1.k1_loco_amp_config import K1LocoAmpCfg, K1LocoAmpCfgPPO
+from .k1.k1_loco_amp_full_config import K1LocoAmpFullCfg, K1LocoAmpFullCfgPPO
 from .k1.k1_omni_move_amp_config import K1OmniMoveAmpCfg, K1OmniMoveAmpCfgPPO
 
 import os
@@ -58,4 +59,5 @@ task_registry.register( "k1", LeggedRobot, K122Cfg(), K122CfgPPO() )
 task_registry.register( "k1_move_amp", LeggedRobotMoveAmp, K1MoveAmpCfg(), K1MoveAmpCfgPPO() )
 task_registry.register( "k1_move_amp_2d", LeggedRobotMoveAmp2D, K1MoveAmp2DCfg(), K1MoveAmp2DCfgPPO() )
 task_registry.register( "k1_loco_amp", LeggedRobotK1LocoAmp, K1LocoAmpCfg(), K1LocoAmpCfgPPO() )
+task_registry.register( "k1_loco_amp_full", LeggedRobotK1LocoAmp, K1LocoAmpFullCfg(), K1LocoAmpFullCfgPPO() )
 task_registry.register( "k1_omni_move_amp", LeggedRobotOmniMoveAmp, K1OmniMoveAmpCfg(), K1OmniMoveAmpCfgPPO() )

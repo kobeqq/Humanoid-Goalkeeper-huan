@@ -245,7 +245,8 @@ class HIMOnPolicyRunner:
                 f"reward_mode={self.amp_reward_mode}, "
                 f"amp_coef={self.amp_coef}, amp_scale={self.amp_scale}, "
                 f"adaptive_amp_scale={self.adaptive_amp_scale}, "
-                f"num_motion_buffers={len(motion_buffer.motion_buffers)}"
+                f"num_motion_buffers={len(motion_buffer.motion_buffers)}, "
+                f"command_conditioned={command_motion_names is not None}"
             )
             print(f"[AMP] motion buffers: {motion_buffer.names}")
             print(f"[AMP] motion probs: {motion_buffer.probs.tolist()}")
@@ -318,7 +319,10 @@ class HIMOnPolicyRunner:
     
     def _get_amp_motion_ids(self):
         if hasattr(self.env, "get_amp_motion_ids"):
-            return self.env.get_amp_motion_ids().to(self.device).clone()
+            motion_ids = self.env.get_amp_motion_ids()
+            if motion_ids is None:
+                return None
+            return motion_ids.to(self.device).clone()
         motion_ids = getattr(self.env, "command_type_ids", None)
         if motion_ids is None:
             return None
@@ -542,6 +546,7 @@ class HIMOnPolicyRunner:
         self.writer.add_scalar('Loss/amp_expert_loss', locs['expert_loss'], locs['it'])
         self.writer.add_scalar('Loss/amp_policy_loss', locs['policy_loss'], locs['it'])
         self.writer.add_scalar('Train/amp_scale', self.amp_scale, locs['it'])
+        self.writer.add_scalar('Train/amp_coef', self.amp_coef, locs['it'])
         self.writer.add_scalar('Train/rollout_raw_task_reward_mean', locs['rollout_raw_reward_mean'], locs['it'])
         self.writer.add_scalar('Train/rollout_raw_amp_reward_mean', locs['rollout_amp_reward_mean'], locs['it'])
         self.writer.add_scalar('Train/rollout_task_contribution_mean', locs['rollout_task_contribution_mean'], locs['it'])

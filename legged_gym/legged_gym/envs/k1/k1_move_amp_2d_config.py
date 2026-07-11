@@ -108,7 +108,7 @@ class K1MoveAmp2DCfg(K1MoveAmpCfg):
         obs_type = "lower_body_state"
         use_all_dofs = True
         num_steps = 2
-        num_obs_per_step = 30
+        num_obs_per_step = 32
         num_obs = num_obs_per_step * num_steps
         amp_coef = 0.15
 

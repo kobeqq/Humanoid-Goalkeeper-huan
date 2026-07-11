@@ -8,7 +8,12 @@ from isaacgym.torch_utils import torch_rand_float
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.legged_robot import LeggedRobot
 from legged_gym.envs.base.legged_robot_move_amp_2d import LeggedRobotMoveAmp2D, euler_from_quaternion, wrap_to_pi
-from legged_gym.envs.g1.g1_utils import MotionLib, build_locomotion_amp_step_obs, load_imitation_dataset
+from legged_gym.envs.g1.g1_utils import (
+    MotionLib,
+    build_locomotion_amp_step_obs,
+    build_lower_body_amp_step_obs,
+    load_imitation_dataset,
+)
 from legged_gym.utils.math import quat_rotate_inverse
 
 
@@ -143,9 +148,13 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         self.amp_lower_dof_names = self.lower_body_dof_names
         self.amp_lower_dof_indices = self.lower_body_dof_indices
         self.amp_obs_per_step = int(getattr(self.cfg.amp, "num_obs_per_step", 32))
+        include_files = getattr(self.cfg.dataset, "include_files", None)
+        exclude_files = getattr(self.cfg.dataset, "exclude_files", None)
         multidataset, mapping = load_imitation_dataset(
             self.cfg.dataset.folder.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
             self.cfg.dataset.joint_mapping.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
+            include_files=include_files,
+            exclude_files=exclude_files,
         )
         num_steps = int(getattr(self.cfg.amp, "num_steps", 2))
         amp_obs_type = getattr(self.cfg.amp, "obs_type", "lower_body_state")
@@ -192,7 +201,11 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
             raise RuntimeError("No positive-weight AMP motions for k1_loco_amp.")
         probs = torch.tensor(self.amp_motion_probs, dtype=torch.float)
         self.amp_motion_probs = probs / probs.sum().clamp(min=1e-6)
-        self._init_amp_command_motion_map()
+        if getattr(self.cfg.amp, "condition_on_command", True):
+            self._init_amp_command_motion_map()
+        else:
+            self.amp_command_names = None
+            self.amp_command_motion_names = None
 
     def _init_amp_command_motion_map(self):
         specs = getattr(self.cfg.commands, "motion_commands", {})
@@ -354,6 +367,15 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
     def get_amp_observations(self):
         q_leg = self.dof_pos[:, self.amp_lower_dof_indices]
         dq_leg = self.dof_vel[:, self.amp_lower_dof_indices]
+        amp_obs_type = getattr(self.cfg.amp, "obs_type", "locomotion_style")
+        if amp_obs_type == "lower_body_state":
+            return build_lower_body_amp_step_obs(
+                q_leg,
+                dq_leg,
+                self.base_lin_vel,
+                self.base_ang_vel,
+                self.projected_gravity,
+            )
         foot_rel_pos, foot_rel_vel = self._get_current_foot_state()
         return build_locomotion_amp_step_obs(
             q_leg,
@@ -367,6 +389,8 @@ class LeggedRobotK1LocoAmp(LeggedRobotMoveAmp2D):
         )
 
     def get_amp_motion_ids(self):
+        if not getattr(self.cfg.amp, "condition_on_command", True):
+            return None
         return self.command_type_ids
 
     def post_physics_step(self):

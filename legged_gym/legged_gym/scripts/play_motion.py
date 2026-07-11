@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kinematically replay a MotionLib-style .pt file in IsaacGym.
+"""Kinematically replay K1 motions in Isaac Gym or MuJoCo.
 
 Example:
 python legged_gym/legged_gym/scripts/play_motion.py \
@@ -24,27 +24,30 @@ Use --keep-gravity to keep URDF gravity on during replay.
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 import time
 
-import isaacgym  # noqa: F401
 import torch
-from isaacgym import gymapi, gymtorch, gymutil
-
-from legged_gym.envs import *  # noqa: F401,F403
-from legged_gym.utils import task_registry
 
 
 DEFAULT_MOTION = (
-    "legged_gym/resources/datasets/goalkeeper_from_pkl_k1/"
-    "goalkeeper_from_pkl_k1.pt"
+    "legged_gym/resources/datasets/k1_motion_amp/Stand-04.txt"
 )
+
+DEFAULT_MUJOCO_MODEL = "legged_gym/resources/robots/k1/urdf/K1_22dof.xml"
 
 
 def parse_args():
 
     custom_parameters = [
+        {
+            "name": "--backend",
+            "type": str,
+            "default": "auto",
+        },
         {
             "name": "--task",
             "type": str,
@@ -195,6 +198,121 @@ def parse_args():
         args.graphics_device_id = 0
 
     return args
+
+
+def parse_mujoco_args():
+    parser = argparse.ArgumentParser(description="Replay a K1 motion in MuJoCo")
+    parser.add_argument("--backend", choices=("auto", "mujoco"), default="auto")
+    parser.add_argument("--motion", default=DEFAULT_MOTION)
+    parser.add_argument("--model", default=DEFAULT_MUJOCO_MODEL)
+    parser.add_argument("--start", type=int, default=0)
+    parser.add_argument("--end", type=int, default=-1)
+    parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--speed", type=float, default=1.0)
+    parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--no-recenter", action="store_true")
+    parser.add_argument("--z-offset", type=float, default=0.0)
+    parser.add_argument("--no-foot-snap", action="store_true")
+    parser.add_argument("--foot-snap-margin", type=float, default=0.0)
+    parser.add_argument("--base-quat-order", choices=("xyzw", "wxyz"), default="xyzw")
+    parser.add_argument("--headless", action="store_true")
+    return parser.parse_args()
+
+
+def load_deepmimic_motion(path):
+    """Load [root xyz, root quat, 22 q, root velocities, 22 qd] frames."""
+    with open(os.path.abspath(path), "r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    frames = torch.as_tensor(payload["Frames"], dtype=torch.float32)
+    if frames.ndim != 2 or frames.shape[1] != 77:
+        raise ValueError(
+            f"Expected k1_motion_amp Frames shaped [T, 77], got {tuple(frames.shape)}"
+        )
+    frame_dt = float(payload["FrameDuration"])
+    if frame_dt <= 0.0:
+        raise ValueError(f"FrameDuration must be positive, got {frame_dt}")
+    return frames, frame_dt
+
+
+def main_mujoco():
+    args = parse_mujoco_args()
+    try:
+        import mujoco
+        import mujoco.viewer
+    except ImportError as exc:
+        raise RuntimeError("MuJoCo playback requires: pip install mujoco") from exc
+
+    frames, source_dt = load_deepmimic_motion(args.motion)
+    model = mujoco.MjModel.from_xml_path(os.path.abspath(args.model))
+    data = mujoco.MjData(model)
+    if model.nq != 29 or model.nv != 28:
+        raise ValueError(
+            f"K1 motion requires a free-base 22-DOF model (nq=29, nv=28); "
+            f"model has nq={model.nq}, nv={model.nv}"
+        )
+
+    start = max(0, args.start)
+    end = len(frames) if args.end < 0 else min(args.end, len(frames))
+    stride = max(1, args.stride)
+    frame_ids = list(range(start, end, stride))
+    if not frame_ids:
+        raise ValueError(f"Empty frame range: start={start}, end={end}")
+    if args.speed <= 0.0:
+        raise ValueError("--speed must be positive")
+
+    root_offset = torch.zeros(3)
+    if not args.no_recenter:
+        root_offset[:2] = -frames[start, :2]
+    root_offset[2] = args.z_offset
+
+    def set_frame(frame):
+        row = frames[frame].numpy()
+        data.qpos[:3] = row[:3] + root_offset.numpy()
+        quat = row[3:7]
+        data.qpos[3:7] = (
+            quat[[3, 0, 1, 2]] if args.base_quat_order == "xyzw" else quat
+        )
+        data.qpos[7:] = row[7:29]
+        # DeepMimic K1 layout: linear vel, angular vel, then 22 joint velocities.
+        data.qvel[:3] = row[29:32]
+        data.qvel[3:6] = row[32:35]
+        data.qvel[6:] = row[35:57]
+        mujoco.mj_forward(model, data)
+
+    set_frame(start)
+    if not args.no_foot_snap:
+        geom_ids = [
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            for name in ("left_foot_link_contact", "right_foot_link_contact")
+        ]
+        geom_ids = [geom_id for geom_id in geom_ids if geom_id >= 0]
+        if geom_ids:
+            min_z = min(float(data.geom_xpos[geom_id, 2]) for geom_id in geom_ids)
+            root_offset[2] += args.foot_snap_margin - min_z
+            set_frame(start)
+
+    print(f"Loaded MuJoCo motion: {args.motion}")
+    print(f"Frames: {len(frames)}, frame_dt={source_dt:.6f}s, model={args.model}")
+    print(f"Root offset applied: {root_offset.tolist()}")
+
+    viewer = None if args.headless else mujoco.viewer.launch_passive(model, data)
+    try:
+        while True:
+            for frame in frame_ids:
+                if viewer is not None and not viewer.is_running():
+                    return
+                t0 = time.time()
+                set_frame(frame)
+                if viewer is not None:
+                    viewer.sync()
+                sleep_t = source_dt * stride / args.speed - (time.time() - t0)
+                if sleep_t > 0:
+                    time.sleep(sleep_t)
+            if not args.loop:
+                break
+    finally:
+        if viewer is not None:
+            viewer.close()
 
 
 def load_motion(path: str):

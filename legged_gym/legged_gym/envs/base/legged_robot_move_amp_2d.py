@@ -4,7 +4,7 @@
 - 目标点在水平面内用极坐标采样；
 - 策略只输出 12 维下肢动作，上肢保持默认姿态；
 - yaw 只作为软约束和独立失败统计，不污染 fall_rate；
-- AMP 先对齐当前 MotionLib 的两步 lower-body DOF expert obs，后续可以扩展到含速度/重力的 30 维单步状态。
+- AMP 先对齐当前 MotionLib 的两步 32 维 lower-body state expert obs。
 """
 
 import math
@@ -101,10 +101,10 @@ class LeggedRobotMoveAmp2D(LeggedRobot):
         self.upper_body_dof_indices = torch.tensor(upper_ids, dtype=torch.long, device=self.device)
 
     def _reinit_amp_motions_for_lower_body(self):
-        # lower_body_state：单步 30 维；runner 拼接连续两步 agent obs -> 60 维，与 MotionLib num_steps=2 对齐。
+        # lower_body_state：单步 32 维；runner 拼接连续两步 agent obs -> 64 维，与 MotionLib num_steps=2 对齐。
         self.amp_lower_dof_names = self.lower_body_dof_names
         self.amp_lower_dof_indices = self.lower_body_dof_indices
-        self.amp_obs_per_step = int(getattr(self.cfg.amp, "num_obs_per_step", 30))
+        self.amp_obs_per_step = int(getattr(self.cfg.amp, "num_obs_per_step", 32))
         multidataset, mapping = load_imitation_dataset(
             self.cfg.dataset.folder.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
             self.cfg.dataset.joint_mapping.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
@@ -422,7 +422,7 @@ class LeggedRobotMoveAmp2D(LeggedRobot):
     # ------------------------------------------------------------------
 
     def get_amp_observations(self):
-        # 单步 30 维 lower-body AMP 状态；runner 会把连续两步拼成 60 维送入判别器。
+        # 单步 32 维 lower-body AMP 状态；runner 会把连续两步拼成 64 维送入判别器。
         q_leg = self.dof_pos[:, self.amp_lower_dof_indices]
         dq_leg = self.dof_vel[:, self.amp_lower_dof_indices]
         return build_lower_body_amp_step_obs(

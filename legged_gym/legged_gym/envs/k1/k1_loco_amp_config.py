@@ -26,13 +26,13 @@ class K1LocoAmpCfg(K1MoveAmpCfg):
         command_scale = [1.0 / max_vx, 1.0 / max_vy, 1.0 / max_wz]
         train_yaw_command = False
         motion_commands = {
-            "standing": {"prob": 0.12, "vx": [0.0, 0.0], "vy": [0.0, 0.0], "wz": [0.0, 0.0]},
-            "forward": {"prob": 0.22, "vx": [0.20, 0.35], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
-            "backward": {"prob": 0.17, "vx": [-0.32, -0.18], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
-            "leftstep": {"prob": 0.16, "vx": [-0.04, 0.04], "vy": [0.18, 0.32], "wz": [0.0, 0.0]},
-            "rightstep": {"prob": 0.16, "vx": [-0.04, 0.04], "vy": [-0.32, -0.18], "wz": [0.0, 0.0]},
-            "diagonal_left": {"prob": 0.08, "vx": [0.18, 0.32], "vy": [0.12, 0.28], "wz": [0.0, 0.0]},
-            "diagonal_right": {"prob": 0.08, "vx": [0.18, 0.32], "vy": [-0.28, -0.12], "wz": [0.0, 0.0]},
+            "standing": {"prob": 0.10, "vx": [0.0, 0.0], "vy": [0.0, 0.0], "wz": [0.0, 0.0]},
+            "forward": {"prob": 0.15, "vx": [0.20, 0.35], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
+            "backward": {"prob": 0.15, "vx": [-0.32, -0.18], "vy": [-0.04, 0.04], "wz": [0.0, 0.0]},
+            "leftstep": {"prob": 0.20, "vx": [-0.04, 0.04], "vy": [0.18, 0.32], "wz": [0.0, 0.0]},
+            "rightstep": {"prob": 0.20, "vx": [-0.04, 0.04], "vy": [-0.32, -0.18], "wz": [0.0, 0.0]},
+            "diagonal_left": {"prob": 0.10, "vx": [0.18, 0.32], "vy": [0.12, 0.28], "wz": [0.0, 0.0]},
+            "diagonal_right": {"prob": 0.10, "vx": [0.18, 0.32], "vy": [-0.28, -0.12], "wz": [0.0, 0.0]},
         }
 
     class init_state(K1MoveAmpCfg.init_state):
